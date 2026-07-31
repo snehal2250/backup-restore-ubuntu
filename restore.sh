@@ -164,6 +164,12 @@ install_app() {
     run sudo apt-get install -y "${deps[@]}"
   fi
 
+  # script/custom installers have no package manager to make them idempotent —
+  # without a check_cmd every re-run re-executes the installer. Warn loudly.
+  if { [ "$itype" = "script" ] || [ "$itype" = "custom" ]; } && [ -z "$check" ]; then
+    warn "  $name: script/custom installer with NO check_cmd — re-runs will re-run the installer (add check_cmd in the inventory)."
+  fi
+
   if [ -n "$check" ] && command -v "$check" >/dev/null 2>&1; then
     ok "  $name: already installed (found '$check')"
   else
@@ -209,19 +215,19 @@ restore_services() {
     [ "$start" = "true" ] || start="false"
     sdir="$BACKUPS_DIR/services/$unit"
     if [ "$BACKUPS_PRESENT" = "1" ] && [ -f "$sdir/unit" ]; then
+      # Order matters: install the unit + reload, then restore the service's
+      # CONFIG (env file, config dir, ...) BEFORE enabling/starting it, so the
+      # service boots with its real configuration on first start (principle:
+      # fresh install, then config overwrite).
       if [ "$target" = "user" ]; then
         dest="$HOME/.config/systemd/user/$unit"
         run mkdir -p "$HOME/.config/systemd/user"
         run cp "$sdir/unit" "$dest"
         run systemctl --user daemon-reload
-        [ "$enable" = "true" ] && run systemctl --user enable "$unit"
-        [ "$start" = "true" ] && run systemctl --user start "$unit"
       else
         dest="/etc/systemd/system/$unit"
         run sudo cp "$sdir/unit" "$dest"
         run sudo systemctl daemon-reload
-        [ "$enable" = "true" ] && run sudo systemctl enable "$unit"
-        [ "$start" = "true" ] && run sudo systemctl start "$unit"
       fi
       # Restore any config files declared for this service (env file, config dir...).
       if [ -d "$sdir/home" ]; then
@@ -231,6 +237,14 @@ restore_services() {
       if [ -d "$sdir/root" ]; then
         run sudo rsync -a "$sdir/root/" /
         ok "  $unit: config restored to /"
+      fi
+      # Now enable/start with the restored config in place.
+      if [ "$target" = "user" ]; then
+        [ "$enable" = "true" ] && run systemctl --user enable "$unit"
+        [ "$start" = "true" ] && run systemctl --user start "$unit"
+      else
+        [ "$enable" = "true" ] && run sudo systemctl enable "$unit"
+        [ "$start" = "true" ] && run sudo systemctl start "$unit"
       fi
       ok "  service: $unit ($target)"
     else

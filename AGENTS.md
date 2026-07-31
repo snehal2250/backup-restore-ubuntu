@@ -78,6 +78,8 @@ AGENTS.md                 <- this file (agents MUST read it)
 README.md                 <- user-facing quick start
 docs/PLAN.md              <- roadmap to the end state
 docs/RESTORE.md           <- user-facing step-by-step restore runbook
+docs/REHEARSAL-VIRTUALBOX.md <- tested VirtualBox rehearsal procedure (Oracle 7.1.x,
+                              VM creation, vboxsf shared folders, restore replay)
 inventory/
   inventory.yaml          <- THE source of truth (user-maintained, git-tracked)
 lib/
@@ -93,17 +95,17 @@ schedule_cron.sh          <- @reboot scheduled backup
 backups/                  <- output of backup.sh (GIT-IGNORED; contains personal config)
                              (apps/<name>/, services/<unit>/, dotfiles/, user-dirs/<name>/)
                            mirrored to BACKUP_DEST (default /media/vikram-athare/Storage/backup-restore-ubuntu)
-                           (legacy backup/ folder from the old script was reviewed and
-                           deleted; a 36 KB root-owned remnant still needs the user's
-                           final 'sudo rm -rf backup')
+                           (the legacy single backup/ folder from the old script was
+                           removed from git tracking; if its on-disk root-owned remnant
+                           still exists, delete it with 'sudo rm -rf backup')
 ```
 
 ## 5. Inventory model (`inventory/inventory.yaml`)
 
 The file is plain YAML with four flat lists (plus `user_dirs`) and two structured lists.
-See the file itself for the commented template. The live inventory currently declares **23 apps + 1 service**
-(four of them — gcloud, gh, go, uv — use install methods corrected to match how the user
-actually installed each tool).
+See the file itself for the commented template. The live inventory currently declares
+**24 apps + 1 service** (gcloud, gh, go, uv use install methods corrected to match how
+the user actually installed each tool; `git` is also declared).
 
 ```yaml
 apt_packages:            # installed via: sudo apt-get install -y <item>
@@ -207,6 +209,13 @@ commands. `BACKUP_DEST=` disables the mirror. Never commit `backups/` (see docs/
 ```
 By default restore only touches the items declared in the inventory (principle 4); it
 never upgrades the whole base OS unless `--upgrade-base` is passed.
+
+Restore semantics: config restore is an **additive overlay** — `rsync -a` copies the
+captured files onto the target and **never deletes** existing target files. A config
+file that no longer exists in the backup is therefore NOT removed from the target
+(history lives in the immutable `BACKUP_DEST` snapshots). This is deliberate: restore
+must never delete data on the target. Services get their `config_paths` restored
+**before** `enable`/`start`, so they boot with real configuration on first start.
 
 **Keep everything current**:
 ```bash

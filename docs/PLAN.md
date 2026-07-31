@@ -13,10 +13,10 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   `backups/` (git-ignored captured config).
 - Single YAML inventory chosen (with `yq` as the one tool dependency).
 - Dotfiles included as an optional inventory list. Only user-declared custom services.
-- Legacy `backup/` folder from the old script was reviewed and deleted (its contents were
+- Legacy `backup/` folder from the old script was reviewed and removed (its contents were
   superseded by `backups/` + the `BACKUP_DEST` mirror; SSH keys were verified identical to
-  `~/.ssh` before deletion). A 36 KB root-owned remnant still needs the user's final
-  `sudo rm -rf backup` to finish the cleanup.
+  `~/.ssh` before deletion). It is now untracked in git and guarded by `.gitignore`;
+  if its on-disk root-owned remnant still exists, remove it once with `sudo rm -rf backup`.
 
 ## Phase 1 — Inventory (✅)
 
@@ -27,11 +27,11 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   (opencode, VS Code, Docker, Chrome, gh, gcloud, go, uv, tmux, terraform, ollama,
   az, azurite, slack, onlyoffice, storage-explorer, ...). Extend as the user adopts
   more apps.
-- **Live inventory: 23 apps + 1 service declared** (`inventory/inventory.yaml`).
+- **Live inventory: 24 apps + 1 service declared** (`inventory/inventory.yaml`).
   Includes 4 install-method corrections that match how the user actually installed
   the tool: gcloud→`snap-classic` (classic snap), gh→official GitHub apt repo,
   go→official go.dev tarball,  uv→official astral installer (instead of pipx, which isn't installed on this system
-  and would have failed on a fresh restore).
+  and would have failed on a fresh restore). `git` is also declared (apt).
 - `inventory.sh` — the manual tool: `list`, `add-package`, `remove-package`, `add-app`
   (wizard with catalog prefill + config-path detection), `add-service` (with optional
   `config_paths` for the service), `remove-app`, `remove-service`, `review` (suggests
@@ -59,6 +59,19 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   SC1091 sourced libs).
 - Validate the full flow in a disposable VM: fresh Ubuntu → `restore.sh` → verify apps,
   configs, services; run it twice to prove idempotency.
+  - 🚧 In progress. Hypervisor settled on **VirtualBox 7.1.x** (Oracle repo — Ubuntu's
+    7.0.16 package can't build its dkms module on the 24.04 HWE kernel 7.0; Oracle's
+    7.1.x has the fix). The full tested procedure lives in
+    **`docs/REHEARSAL-VIRTUALBOX.md`** (install VBox, create VM, install Ubuntu,
+    vboxsf shared folders, restore replay).
+  - ✅ Service restore ordering fixed: `restore_services()` now restores a service's
+    `config_paths` **before** `enable`/`start`, so services boot with real config.
+  - ✅ Root-side (`/` path) config capture made explicit in `backup.sh`: unreadable
+    root-owned paths warn instead of silently failing (run with sudo to capture them).
+  - ✅ `restore.sh` warns when a `script`/`custom` app has no `check_cmd` (re-runs would
+    re-run the installer).
+  - ✅ Restore semantics documented as **additive overlay** (never deletes target files),
+    matching the implementation.
 - Test `--dry-run` output is accurate end-to-end.
 - ✅ Decided & documented: `backups/` is carried off-machine via the configurable
   `BACKUP_DEST` mirror (default `/media/vikram-athare/Storage/backup-restore-ubuntu`),

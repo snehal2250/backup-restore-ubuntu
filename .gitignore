@@ -1,2 +1,4 @@
 # Captured configuration output from backup.sh — can contain secrets, keep out of git.
 backups/
+# Legacy single-backup folder from the old script (superseded by backups/) — never re-add.
+backup/

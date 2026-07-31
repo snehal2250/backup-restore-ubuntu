@@ -66,11 +66,22 @@ while IFS= read -r name; do
     fi
     if [[ "$src" == "$HOME"* ]]; then
       rel="${src#"$HOME"/}"
-      ( cd "$HOME" && rsync -aR "${excl[@]}" "./$rel" "$dest/home/" )
+      if ( cd "$HOME" && rsync -aR "${excl[@]}" "./$rel" "$dest/home/" ); then
+        ok "  $p -> backups/apps/$name/"
+      else
+        warn "  $p -> rsync failed (partial read?); fix permissions and re-run"
+      fi
+    elif [ ! -r "$src" ]; then
+      # Non-$HOME (root-side) config may be root-owned and unreadable by the
+      # current user. Detect that up front and warn instead of failing silently
+      # or aborting the whole run (backup.sh is normally run WITHOUT sudo — and
+      # running it WITH sudo would flip \$HOME to /root and break this script).
+      warn "  $p -> not readable by current user; fix permissions (chmod/chown) or declare a readable path in the inventory"
+    elif ( cd / && rsync -aR "${excl[@]}" "./${src#/}" "$dest/root/" ); then
+      ok "  $p -> backups/apps/$name/"
     else
-      ( cd / && rsync -aR "${excl[@]}" "./${src#/}" "$dest/root/" )
+      warn "  $p -> rsync failed (partial read?); fix permissions and re-run"
     fi
-    ok "  $p -> backups/apps/$name/"
   done < <(yq -r ".apps[] | select(.name == \"$name\") | .config_paths[]?" "$INVENTORY_FILE")
 done < <(yaml_list '.apps[] | .name')
 
@@ -106,11 +117,20 @@ while IFS=$'\t' read -r unit target; do
     mkdir -p "$sdest/home" "$sdest/root"
     if [[ "$csrc" == "$HOME"* ]]; then
       rel="${csrc#"$HOME"/}"
-      ( cd "$HOME" && rsync -aR "./$rel" "$sdest/home/" )
+      if ( cd "$HOME" && rsync -aR "./$rel" "$sdest/home/" ); then
+        ok "  $unit: $p -> backups/services/$unit/"
+      else
+        warn "  $unit: $p -> rsync failed (partial read?); fix permissions and re-run"
+      fi
+    elif [ ! -r "$csrc" ]; then
+      # Root-side service config may be root-owned; warn instead of silent failure.
+      # (Do NOT suggest running backup.sh with sudo — that would flip \$HOME to /root.)
+      warn "  $unit: $p -> not readable by current user; fix permissions (chmod/chown) or declare a readable path in the inventory"
+    elif ( cd / && rsync -aR "./${csrc#/}" "$sdest/root/" ); then
+      ok "  $unit: $p -> backups/services/$unit/"
     else
-      ( cd / && rsync -aR "./${csrc#/}" "$sdest/root/" )
+      warn "  $unit: $p -> rsync failed (partial read?); fix permissions and re-run"
     fi
-    ok "  $unit: $p -> backups/services/$unit/"
   done < <(yq -r ".services[] | select(.unit == \"$unit\") | .config_paths[]?" "$INVENTORY_FILE")
 done < <(yq -r '.services[] | [.unit, (.target // "system")] | @tsv' "$INVENTORY_FILE")
 

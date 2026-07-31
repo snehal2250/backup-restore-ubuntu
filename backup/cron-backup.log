@@ -1,1 +1,0 @@
-yq is required to read /home/vikram-athare/backup-restore-ubuntu/inventory/inventory.yaml. Install it now? [y/N] [1;31m[ERR ][0m yq is required. Install it with: sudo snap install yq

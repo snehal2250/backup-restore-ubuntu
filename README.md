@@ -46,6 +46,7 @@ copying of the OS itself.
 
 # 3. On a fresh Ubuntu: restore (fresh install + your config)
 #    Full step-by-step runbook: docs/RESTORE.md
+#    VirtualBox rehearsal (test the restore path in a VM): docs/REHEARSAL-VIRTUALBOX.md
 ./restore.sh                        # prompts; --yes to skip, --dry-run to preview
 ./restore.sh --upgrade-base         # OPT-IN: also apt full-upgrade of the base OS
 
@@ -107,6 +108,14 @@ app's captured folder before re-capturing, so `backups/` reflects the **current*
 only (a config file that no longer exists on disk is dropped from the live `backups/`).
 History lives in the timestamped mirror snapshots in `BACKUP_DEST`, which are immutable
 once created.
+
+**Does restore delete config files I removed?** No. Restore is an **additive overlay** —
+it copies the captured config onto the fresh install and never deletes existing target
+files. To get a pristine config, delete the app's config dir before re-running restore.
+
+**Do services start before or after their config is restored?** After. `restore.sh`
+restores each service's `config_paths` before `enable`/`start`, so a service boots with
+its real configuration on first start.
 
 **How do I back up my Documents (or any folder)?** Declare it as a `user_dirs` entry
 (`./inventory.sh add-user-dir ~/Documents`). Unlike app config, these are whole

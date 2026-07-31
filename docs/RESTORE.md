@@ -172,13 +172,21 @@ app via its method (`apt`/`snap`/`snap-classic`/`flatpak`/`npm-global`/`pipx`/`c
 
 **Phase 4/5 — services.** Each declared service's unit file is copied to
 `/etc/systemd/system/` (system) or `~/.config/systemd/user/` (user), `daemon-reload` runs,
-then `enable`/`start` per the declaration, then its `config_paths` are restored.
+then its `config_paths` (env file, config dir, ...) are restored, and **then**
+`enable`/`start` per the declaration — so the service boots with its real configuration
+on first start.
 
 **Phase 5/5 — dotfiles & user dirs.** Each declared dotfile is copied from
 `backups/dotfiles/` to `$HOME`. Whole user-data folders declared in `user_dirs`
 (e.g. `~/Documents`) are restored wholesale from `backups/user-dirs/` back to `$HOME`.
 Declare them with `./inventory.sh add-user-dir ~/Documents`; `backup.sh` captures them
 in full (they are user data, not app config).
+
+**Config restore is an additive overlay.** `restore.sh` copies the captured files onto
+the target and **never deletes** existing target files — a config file that no longer
+exists in the backup is not removed from the restored machine (deliberate: restore must
+never delete data; history lives in the immutable `BACKUP_DEST` snapshots). If you want
+a pristine config, delete the app's config dir before re-running restore.
 
 Two failure behaviors, by design:
 
@@ -248,24 +256,40 @@ exercise the real path (fresh install → config overwrite → services up).
 
 Cost: ~1–2 hours + a few GB of disk. Plan for it once.
 
+> **📌 Tested rehearsal path: VirtualBox.** The full, click-by-click procedure (install
+> Oracle's VirtualBox 7.1.x, create the VM, install Ubuntu, wire real `vboxsf` shared
+> folders, replay the restore) is documented separately in
+> **`docs/REHEARSAL-VIRTUALBOX.md`**. The sections below are the generic, hypervisor-
+> agnostic steps; use the VirtualBox doc for the exact commands and GUI details.
+> VirtualBox was chosen over GNOME Boxes because its shared folders (`/media/sf_*`) are
+> **real live mounts** — GNOME Boxes' built-in sharing is SPICE-WebDAV, which behaves
+> like copy-based file-manager access rather than a live folder.
+
 ### 6.1 Pre-rehearsal hardware checklist (run once, on the real machine)
 
 The rehearsal creates a real VM, so the machine that runs it needs a working hypervisor
 with hardware acceleration. Do this **once** on the working machine (not inside a
 prep/CI environment — the VM needs your actual hardware):
 
-**1. Install a hypervisor.** VirtualBox is the recommended option for this rehearsal:
+**1. Install a hypervisor.** VirtualBox is the tested path for this rehearsal. Use
+**Oracle's VirtualBox 7.1.x** — the Ubuntu package (7.0.16) cannot build its kernel
+module on this machine's 24.04 HWE kernel 7.0 (KVM symbol namespaces break
+`virtualbox-dkms`; see § 1 of docs/REHEARSAL-VIRTUALBOX.md for the exact install and
+verification):
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y virtualbox virtualbox-ext-pack virtualbox-dkms
+# Oracle repo + VirtualBox 7.1.x (has the kernel fix) — full steps: docs/REHEARSAL-VIRTUALBOX.md
+wget -qO- https://www.virtualbox.org/download/oracle_vbox_2016.asc | \
+  sudo gpg --dearmor --yes -o /usr/share/keyrings/oracle-virtualbox-2016.gpg
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/oracle-virtualbox-2016.gpg] \
+https://download.virtualbox.org/virtualbox/debian noble contrib" | \
+  sudo tee /etc/apt/sources.list.d/virtualbox.list
+sudo apt-get update && sudo apt-get install -y virtualbox-7.1
+# then verify: ls -l /dev/vboxdrv  +  getent group vboxusers  +  usermod -aG vboxusers $USER
 # alternatives (any hypervisor works — the repo is hypervisor-agnostic):
-#   sudo apt-get install -y gnome-boxes
+#   sudo apt-get install -y gnome-boxes      # built-in WebDAV sharing is copy-like; ok in a pinch
 #   sudo apt-get install -y qemu-kvm libvirt-daemon-system virt-manager
 ```
-
-> `virtualbox-dkms` rebuilds the `vboxdrv` module automatically on kernel updates —
-> without it, VirtualBox can stop working after a kernel upgrade.
 
 **2. Enable hardware virtualization in the BIOS.** The setting is named **SVM Mode** on
 AMD boards (this machine: Gigabyte B550M K) or **Intel VT-x** on Intel. It is off by
@@ -274,19 +298,21 @@ default on many boards, and no hypervisor gets hardware acceleration until it is
 - Reboot and tap **Del** to enter the BIOS; switch to Advanced mode with **F2**;
   **Tweaker/M.I.T. → Advanced CPU Settings → SVM Mode → Enabled**; save with **F10**.
 - If acceleration still does not work after that, also disable **Secure Boot** and/or
-  load the module manually: VirtualBox → `sudo modprobe vboxdrv`; KVM →
-  `sudo modprobe kvm_amd` (Intel: `kvm_intel`).
+  load the module manually: VirtualBox → `sudo modprobe vboxdrv`;
+  KVM/Boxes → `sudo modprobe kvm_amd` (Intel: `kvm_intel`).
 
 **3. Verify acceleration is live** (after rebooting back into Ubuntu):
 
 ```bash
-# VirtualBox (recommended) — uses its OWN kernel module, NOT /dev/kvm:
-lsmod | grep vboxdrv                     # expect: vboxdrv ...
-sudo usermod -aG vboxusers "$USER"       # then log out/in once for it to apply
-# KVM/Boxes instead — expect /dev/kvm to exist:
-#   ls -l /dev/kvm                       # expect: crw-rw---- 1 root kvm ...
-#   sudo systemctl enable --now libvirtd
-#   sudo usermod -aG libvirt "$USER"
+# VirtualBox (tested path) — uses its OWN kernel module:
+lsmod | grep vboxdrv                    # expect: vboxdrv ...
+ls -l /dev/vboxdrv                      # expect: crw-rw---- 1 root vboxusers ...
+getent group vboxusers                  # expect: vboxusers:x:...  (exists after install)
+sudo usermod -aG vboxusers "$USER"      # add yourself, then log out/in once
+# KVM/Boxes instead — uses /dev/kvm, NOT vboxdrv:
+#   ls -l /dev/kvm                      # expect: crw-rw---- 1 root kvm ...
+#   virsh -c qemu:///session list       # expect: no error (virsh ships in libvirt-clients)
+#   sudo usermod -aG kvm "$USER"        # if no ACL and access is denied
 ```
 
 > **Why this matters:** without hardware acceleration (SVM/AMD-V), the hypervisor falls
@@ -303,7 +329,8 @@ Use this newest snapshot as the rehearsal's config source.
 
 ### 6.3 Create the disposable VM
 
-- Any local hypervisor: GNOME Boxes, VirtualBox, or virt-manager/KVM. Free.
+- Any local hypervisor: **VirtualBox (tested path — see 6.1 and
+  docs/REHEARSAL-VIRTUALBOX.md)**, virt-manager/KVM, or GNOME Boxes. Free.
 - Install a **stock Ubuntu, same major release** as your working machine, complete the
   first-boot setup. The first user must have sudo (the default user does).
 
@@ -311,11 +338,14 @@ Use this newest snapshot as the rehearsal's config source.
 
 The Storage disk holds only `backup-*` snapshots (the mirror of `backups/`), **not** the
 repo — bring the repo via git clone or a copy of the folder (same as section 2.2), then
-restore the config from the newest snapshot (same as section 2.3):
+restore the config from the newest snapshot (same as section 2.3).
+
+In the VirtualBox rehearsal, the snapshot share appears at **`/media/sf_snapshots`**
+(live `vboxsf` mount — see docs/REHEARSAL-VIRTUALBOX.md § 4–5 for wiring it up):
 
 ```bash
 mkdir -p backups
-newest=$(ls -1dr /media/vikram-athare/Storage/backup-restore-ubuntu/backup-* | head -1)
+newest=$(ls -1dr /media/sf_snapshots/backup-* | head -1)
 cp -a "$newest/." backups/
 ```
 
