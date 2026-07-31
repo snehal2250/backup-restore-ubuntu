@@ -1,1 +1,5 @@
+# Captured configuration output from backup.sh — can contain secrets, keep out of git.
+backups/
+
+# Legacy output folder from the pre-rearchitecture backup script — keep out of git.
 backup/

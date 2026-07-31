@@ -1,125 +1,263 @@
 #!/bin/bash
+# ---------------------------------------------------------------------------
+# restore.sh — REBUILD the system from the inventory.
+#
+# Philosophy (see AGENTS.md): install everything FRESH from recommended sources
+# at the latest stable version; copy back ONLY configuration from backups/.
+# Never installs from backup files, never replays dpkg state, never pins versions.
+#
+# Usage:
+#   ./restore.sh                 # prompts before modifying the system
+#   ./restore.sh --yes           # skip prompts
+#   ./restore.sh --dry-run       # preview everything without executing
+#   ./restore.sh --upgrade-base  # ALSO apt full-upgrade the base OS (opt-in)
+# ---------------------------------------------------------------------------
 set -euo pipefail
 
-if [ -z "$HOME" ]; then
-  echo "ERROR: HOME is not set"
-  exit 1
-fi
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BACKUP_DIR="$SCRIPT_DIR/backup"
-if [ ! -d "$BACKUP_DIR" ]; then
-  echo "Backup directory $BACKUP_DIR not found."
-  exit 1
-fi
+DRY_RUN=0
+ASSUME_YES=0
+DO_UPGRADE=0   # base OS upgrade is opt-in: only declared items are touched by default
 
-echo "Restoring apt sources..."
-if [ -f "$BACKUP_DIR/apt/sources.list" ]; then
-  sudo cp "$BACKUP_DIR/apt/sources.list" /etc/apt/sources.list
-  sudo rm -rf /etc/apt/sources.list.d
-  sudo mkdir -p /etc/apt/sources.list.d
-  sudo cp -r "$BACKUP_DIR/apt/sources.list.d/"* /etc/apt/sources.list.d/ 2>/dev/null || true
-  sudo rm -rf /etc/apt/trusted.gpg.d
-  sudo mkdir -p /etc/apt/trusted.gpg.d
-  sudo cp -r "$BACKUP_DIR/apt/trusted.gpg.d/"* /etc/apt/trusted.gpg.d/ 2>/dev/null || true
-  sudo rm -rf /etc/apt/keyrings
-  sudo mkdir -p /etc/apt/keyrings
-  sudo cp -r "$BACKUP_DIR/apt/keyrings/"* /etc/apt/keyrings/ 2>/dev/null || true
-fi
-
-echo "Updating apt metadata..."
-sudo apt-get update
-
-if [ -f "$BACKUP_DIR/apt/package-selections.txt" ]; then
-  echo "Restoring apt package selections..."
-  sudo dpkg --set-selections < "$BACKUP_DIR/apt/package-selections.txt"
-  sudo apt-get -y dselect-upgrade
-fi
-
-if [ -f "$BACKUP_DIR/snap/snap-list.txt" ] && command -v snap >/dev/null 2>&1; then
-  echo "Restoring snap packages..."
-  while IFS=$'\t' read -r pkg notes; do
-    [ -z "$pkg" ] && continue
-    if [[ "$pkg" == "Name" ]]; then
-      continue
-    fi
-    if snap list "$pkg" >/dev/null 2>&1; then
-      echo "Snap $pkg already installed"
-      continue
-    fi
-    if [[ "$notes" == *classic* ]]; then
-      sudo snap install --classic "$pkg" || true
-    else
-      sudo snap install "$pkg" || true
-    fi
-  done < "$BACKUP_DIR/snap/snap-list.txt"
-fi
-
-if [ -f "$BACKUP_DIR/snap/flatpak-list.txt" ] && command -v flatpak >/dev/null 2>&1; then
-  echo "Restoring flatpak applications..."
-  while read -r app; do
-    [ -z "$app" ] && continue
-    flatpak install -y "$app" || true
-  done < "$BACKUP_DIR/snap/flatpak-list.txt"
-fi
-
-if [ -f "$BACKUP_DIR/vscode/extensions.txt" ] && command -v code >/dev/null 2>&1; then
-  echo "Restoring VS Code extensions..."
-  while read -r ext; do
-    [ -z "$ext" ] && continue
-    code --install-extension "$ext" || true
-  done < "$BACKUP_DIR/vscode/extensions.txt"
-fi
-
-echo "Restoring configs..."
-rsync -a "$BACKUP_DIR/configs/config/" "$HOME/.config/" 2>/dev/null || true
-rsync -a "$BACKUP_DIR/configs/ssh/" "$HOME/.ssh/" 2>/dev/null || true
-[ -f "$BACKUP_DIR/configs/.gitconfig" ] && cp "$BACKUP_DIR/configs/.gitconfig" "$HOME/"
-rsync -a "$BACKUP_DIR/configs/local-share-code/" "$HOME/.local/share/code/" 2>/dev/null || true
-rsync -a "$BACKUP_DIR/configs/local-share-applications/" "$HOME/.local/share/applications/" 2>/dev/null || true
-
-echo "Restoring dotfiles..."
-for dotfile in .bashrc .profile .bash_aliases .bash_functions .zshrc .inputrc; do
-  if [ -f "$BACKUP_DIR/dotfiles/$dotfile" ] || [ -d "$BACKUP_DIR/dotfiles/$dotfile" ]; then
-    cp -r "$BACKUP_DIR/dotfiles/$dotfile" "$HOME/"
-  fi
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run)      DRY_RUN=1 ;;
+    --yes|-y)       ASSUME_YES=1 ;;
+    --upgrade-base) DO_UPGRADE=1 ;;
+    *) die "Unknown option: $1 (usage: $0 [--dry-run] [--yes] [--upgrade-base])" ;;
+  esac
+  shift
 done
 
-if [ -d "$BACKUP_DIR/services/systemd/system" ]; then
-  echo "Restoring custom services..."
-  sudo cp -r "$BACKUP_DIR/services/systemd/system/"* /etc/systemd/system/ 2>/dev/null || true
-  sudo systemctl daemon-reload
-  if [ -f "$BACKUP_DIR/services/enabled-services.txt" ]; then
-    while read -r service; do
-      [ -z "$service" ] && continue
-      sudo systemctl enable --now "$service" || true
-    done < "$BACKUP_DIR/services/enabled-services.txt"
+[ -f "$INVENTORY_FILE" ] || die "Inventory file not found: $INVENTORY_FILE"
+require_yq "$([ "$DRY_RUN" = "0" ] && echo 1 || echo 0)"
+require_cmd sudo
+
+# --- Preflight ------------------------------------------------------------
+if [ -r /etc/os-release ]; then
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  [ "${ID:-}" = "ubuntu" ] || warn "This repo targets Ubuntu; detected: ${ID:-unknown} ${VERSION_ID:-}"
+else
+  warn "Cannot determine the OS (/etc/os-release missing)."
+fi
+
+BACKUPS_PRESENT=0
+[ -d "$BACKUPS_DIR" ] && BACKUPS_PRESENT=1
+if [ "$BACKUPS_PRESENT" = "0" ]; then
+  warn "No backups/ found — packages will still be installed, but configuration cannot be restored."
+fi
+
+if [ "$DRY_RUN" = "0" ] && [ "$ASSUME_YES" = "0" ]; then
+  confirm "This will install packages and modify the system. Continue?" "n" || die "Aborted."
+fi
+
+# --- Phase 1: base system -------------------------------------------------
+info "Phase 1/5: base system"
+run sudo apt-get update
+if [ "$DO_UPGRADE" = "1" ]; then
+  info "(--upgrade-base: apt full-upgrade of the whole base OS)"
+  run sudo apt-get full-upgrade -y
+  run sudo apt-get autoremove -y
+else
+  info "(base OS full-upgrade skipped by default — opt in with --upgrade-base)"
+fi
+
+# --- Phase 2: packages ----------------------------------------------------
+info "Phase 2/5: packages"
+
+install_apt_packages() {
+  local -a pkgs=() p
+  while IFS= read -r p; do
+    [ -n "$p" ] && pkgs+=("$p")
+  done < <(yaml_list '.apt_packages[]')
+  if [ "${#pkgs[@]}" -gt 0 ]; then
+    info "Installing ${#pkgs[@]} apt package(s): ${pkgs[*]}"
+    run sudo apt-get install -y "${pkgs[@]}"
   fi
-fi
+}
 
-if [ -f "$BACKUP_DIR/apps/opt.tar.gz" ]; then
-  echo "Restoring /opt application directories..."
-  sudo mkdir -p /opt
-  sudo tar -xzf "$BACKUP_DIR/apps/opt.tar.gz" -C /opt
-fi
-
-if [ -f "$BACKUP_DIR/apps/usr-local.tar.gz" ]; then
-  echo "Restoring /usr/local application directories..."
-  sudo tar -xzf "$BACKUP_DIR/apps/usr-local.tar.gz" -C /usr/local
-fi
-
-if [ -d "$BACKUP_DIR/apps/package-json" ]; then
-  echo "Restoring saved package.json files..."
-  find "$BACKUP_DIR/apps/package-json" -type f | while read -r file; do
-    rel_path="${file#$BACKUP_DIR/apps/package-json/}"
-    if [[ "$rel_path" == home/* ]]; then
-      dest="$HOME/${rel_path#home/}"
-    else
-      dest="/$rel_path"
+install_snap_packages() {
+  local -a pkgs=() p entry pkg classic
+  while IFS= read -r p; do
+    [ -n "$p" ] && pkgs+=("$p")
+  done < <(yaml_list '.snap_packages[]')
+  if [ "${#pkgs[@]}" -gt 0 ]; then
+    if ! command -v snap >/dev/null 2>&1; then
+      warn "snap is not available on this system; skipping snap packages."
+      return 0
     fi
-    mkdir -p "$(dirname "$dest")"
-    sudo cp "$file" "$dest"
-  done
-fi
+    for entry in "${pkgs[@]}"; do
+      pkg="${entry%%:*}"
+      classic=""
+      [ "${entry##*:}" = "classic" ] && classic="--classic"
+      info "Installing snap: $entry"
+      run sudo snap install $classic "$pkg"
+    done
+  fi
+}
 
-echo "Restore complete. Review output and reboot when ready."
+install_flatpak_apps() {
+  local -a apps=() a
+  while IFS= read -r a; do
+    [ -n "$a" ] && apps+=("$a")
+  done < <(yaml_list '.flatpak_apps[]')
+  if [ "${#apps[@]}" -gt 0 ]; then
+    command -v flatpak >/dev/null 2>&1 || {
+      info "flatpak not found — installing it."
+      run sudo apt-get install -y flatpak
+    }
+    run flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+    for a in "${apps[@]}"; do
+      info "Installing flatpak app: $a"
+      run flatpak install -y flathub "$a"
+    done
+  fi
+}
+
+install_apt_packages
+install_snap_packages
+install_flatpak_apps
+
+# --- Phase 3: apps (fresh install + config overwrite) ----------------------
+info "Phase 3/5: apps"
+
+restore_app_config() {
+  local name="$1" dir="$BACKUPS_DIR/apps/$name"
+  [ "$BACKUPS_PRESENT" = "1" ] || return 0
+  if [ -d "$dir/home" ]; then
+    run rsync -a "$dir/home/" "$HOME/"
+    ok "  $name: config restored to \$HOME"
+  fi
+  if [ -d "$dir/root" ]; then
+    run sudo rsync -a "$dir/root/" /
+    ok "  $name: config restored to /"
+  fi
+}
+
+install_app() {
+  local name="$1" itype icmd check
+  itype="$(app_get "$name" '.install_type')"
+  [ -n "$itype" ] || { warn "  app '$name' has no install_type — skipping."; return 0; }
+  icmd="$(app_get "$name" '.install_command')"
+  check="$(app_get "$name" '.check_cmd')"
+
+  # Dependencies are auto-installed with the app; they are never separate
+  # inventory items (AGENTS.md principle 4).
+  local -a deps=() d
+  while IFS= read -r d; do
+    [ -n "$d" ] && deps+=("$d")
+  done < <(yq -r ".apps[] | select(.name == \"$name\") | .depends_apt[]?" "$INVENTORY_FILE")
+  if [ "${#deps[@]}" -gt 0 ]; then
+    info "  $name: installing dependencies: ${deps[*]}"
+    run sudo apt-get install -y "${deps[@]}"
+  fi
+
+  if [ -n "$check" ] && command -v "$check" >/dev/null 2>&1; then
+    ok "  $name: already installed (found '$check')"
+  else
+    case "$itype" in
+      apt)          run sudo apt-get install -y "$name" ;;
+      snap)         run sudo snap install "$name" ;;
+      snap-classic) run sudo snap install --classic "$name" ;;
+      flatpak)      run flatpak install -y flathub "$name" ;;
+      npm-global)   run sudo npm install -g "$name"@latest ;;
+      pipx)         run pipx install "$name" ;;
+      cargo)        run cargo install "$name" ;;
+      script|custom)
+        [ -n "$icmd" ] || die "  app '$name' uses install_type '$itype' but has no install_command."
+        if [ "$DRY_RUN" = "1" ]; then
+          printf '[dry-run] install %s: %s\n' "$name" "$icmd"
+        else
+          info "  $name: running official installer..."
+          bash -c "$icmd" || warn "  install command for '$name' failed (exit $?)."
+        fi
+        ;;
+      *) warn "  app '$name': unknown install_type '$itype' — skipping." ;;
+    esac
+  fi
+
+  restore_app_config "$name"
+}
+
+while IFS= read -r name; do
+  [ -n "$name" ] || continue
+  info "App: $name"
+  install_app "$name"
+done < <(yaml_list '.apps[] | .name')
+
+# --- Phase 4: services -----------------------------------------------------
+info "Phase 4/5: services"
+
+restore_services() {
+  local unit target enable start sdir dest
+  while IFS=$'\t' read -r unit target enable start; do
+    [ -n "$unit" ] || continue
+    [ "$target" = "user" ] || target="system"
+    [ "$enable" = "true" ] || enable="false"
+    [ "$start" = "true" ] || start="false"
+    sdir="$BACKUPS_DIR/services/$unit"
+    if [ "$BACKUPS_PRESENT" = "1" ] && [ -f "$sdir/unit" ]; then
+      if [ "$target" = "user" ]; then
+        dest="$HOME/.config/systemd/user/$unit"
+        run mkdir -p "$HOME/.config/systemd/user"
+        run cp "$sdir/unit" "$dest"
+        run systemctl --user daemon-reload
+        [ "$enable" = "true" ] && run systemctl --user enable "$unit"
+        [ "$start" = "true" ] && run systemctl --user start "$unit"
+      else
+        dest="/etc/systemd/system/$unit"
+        run sudo cp "$sdir/unit" "$dest"
+        run sudo systemctl daemon-reload
+        [ "$enable" = "true" ] && run sudo systemctl enable "$unit"
+        [ "$start" = "true" ] && run sudo systemctl start "$unit"
+      fi
+      # Restore any config files declared for this service (env file, config dir...).
+      if [ -d "$sdir/home" ]; then
+        run rsync -a "$sdir/home/" "$HOME/"
+        ok "  $unit: config restored to \$HOME"
+      fi
+      if [ -d "$sdir/root" ]; then
+        run sudo rsync -a "$sdir/root/" /
+        ok "  $unit: config restored to /"
+      fi
+      ok "  service: $unit ($target)"
+    else
+      warn "  service '$unit': no unit file in backups/ — skipping."
+    fi
+  done < <(yq -r '.services[] | [.unit, (.target // "system"), (.enable // false | tostring), (.start // false | tostring)] | @tsv' "$INVENTORY_FILE")
+}
+
+restore_services
+
+# --- Phase 5: dotfiles ------------------------------------------------------
+info "Phase 5/5: dotfiles"
+
+restore_dotfiles() {
+  local df
+  while IFS= read -r df; do
+    [ -n "$df" ] || continue
+    if [ "$BACKUPS_PRESENT" = "1" ] && [ -f "$BACKUPS_DIR/dotfiles/$df" ]; then
+      run cp "$BACKUPS_DIR/dotfiles/$df" "$HOME/$df"
+      ok "  dotfile: $df"
+    else
+      warn "  dotfile '$df': no backup — skipping."
+    fi
+  done < <(yaml_list '.dotfiles[]')
+}
+
+restore_dotfiles
+
+# --- Wrap-up ---------------------------------------------------------------
+echo
+ok "Restore complete."
+if [ "$DRY_RUN" = "1" ]; then
+  echo "(dry run — nothing was executed)"
+  exit 0
+fi
+echo
+echo "Next steps:"
+echo "  1. Review the output above for warnings."
+echo "  2. Reboot so services and configuration take full effect."
+echo "  3. Keep everything current with ./update_all_ubuntu.sh"

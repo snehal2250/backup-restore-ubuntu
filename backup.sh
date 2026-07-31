@@ -1,98 +1,107 @@
 #!/bin/bash
+# ---------------------------------------------------------------------------
+# backup.sh — capture the CONFIGURATION of everything declared in
+# inventory/inventory.yaml into the git-ignored backups/ folder.
+#
+# What is captured (and nothing else):
+#   * config_paths of every declared app        (mirrored under backups/apps/<name>/)
+#   * unit file + config_paths of every service (backups/services/<unit>/unit + /home + /root)
+#   * declared dotfiles                         (backups/dotfiles/<name>)
+#
+# Safe to run anytime. Output: backups/ (git-ignored) + backups/backup-info.txt
+# ---------------------------------------------------------------------------
 set -euo pipefail
 
-if [ -z "$HOME" ]; then
-  echo "ERROR: HOME is not set"
-  exit 1
-fi
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
-export PATH=/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+YQ_AUTO=2   # interactive tool: if yq is missing, ask the user to install it
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BACKUP_DIR="$SCRIPT_DIR/backup"
-mkdir -p "$BACKUP_DIR"/{apt,services,snap,vscode,configs,dotfiles,apps}
+[ -f "$INVENTORY_FILE" ] || die "Inventory file not found: $INVENTORY_FILE"
+require_yq
 
-CODE_CMD=""
-for candidate in /snap/bin/code /usr/bin/code /usr/local/bin/code; do
-  if [ -x "$candidate" ]; then
-    CODE_CMD="$candidate"
-    break
+mkdir -p "$BACKUPS_DIR"/{apps,services,dotfiles}
+
+{
+  echo "host: $(hostname)"
+  echo "user: $USER"
+  echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "repo: $REPO_ROOT"
+  git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null | sed 's/^/git_commit: /' || true
+} > "$BACKUPS_DIR/backup-info.txt"
+ok "Backup info written to backups/backup-info.txt"
+
+# --- Apps: capture declared config paths ---------------------------------
+while IFS= read -r name; do
+  [ -n "$name" ] || continue
+  dest="$BACKUPS_DIR/apps/$name"
+  mkdir -p "$dest/home" "$dest/root"
+  info "Backing up config for app: $name"
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    src="$(expand_path "$p")"
+    if [ ! -e "$src" ]; then
+      warn "  skip (path not found): $p"
+      continue
+    fi
+    if [[ "$src" == "$HOME"* ]]; then
+      rel="${src#$HOME/}"
+      ( cd "$HOME" && rsync -aR "./$rel" "$dest/home/" )
+    else
+      ( cd / && rsync -aR "./${src#/}" "$dest/root/" )
+    fi
+    ok "  $p -> backups/apps/$name/"
+  done < <(yq -r ".apps[] | select(.name == \"$name\") | .config_paths[]?" "$INVENTORY_FILE")
+done < <(yaml_list '.apps[] | .name')
+
+# --- Services: capture declared unit files + config paths ------------------
+while IFS=$'\t' read -r unit target; do
+  [ -n "$unit" ] || continue
+  sdest="$BACKUPS_DIR/services/$unit"
+  # Remove a stale unit-file-from-old-layout at this path so mkdir can proceed.
+  [ -f "$sdest" ] && rm -f "$sdest"
+  mkdir -p "$sdest"
+  if [ "$target" = "user" ]; then
+    src="$HOME/.config/systemd/user/$unit"
+  else
+    src="/etc/systemd/system/$unit"
   fi
-done
-
-echo "Saving apt package selections..."
-dpkg --get-selections > "$BACKUP_DIR/apt/package-selections.txt"
-dpkg-query -W -f='${Package}\n' > "$BACKUP_DIR/apt/package-list.txt"
-
-echo "Saving apt sources..."
-sudo mkdir -p "$BACKUP_DIR/apt/sources.list.d"
-sudo cp -r /etc/apt/sources.list "$BACKUP_DIR/apt/sources.list"
-sudo cp -r /etc/apt/sources.list.d/* "$BACKUP_DIR/apt/sources.list.d/" 2>/dev/null || true
-sudo mkdir -p "$BACKUP_DIR/apt/trusted.gpg.d"
-sudo cp -r /etc/apt/trusted.gpg.d/* "$BACKUP_DIR/apt/trusted.gpg.d/" 2>/dev/null || true
-sudo mkdir -p "$BACKUP_DIR/apt/keyrings"
-sudo cp -r /etc/apt/keyrings/* "$BACKUP_DIR/apt/keyrings/" 2>/dev/null || true
-
-echo "Saving snap package list..."
-snap list --all | awk 'NR>1 {notes=""; for (i=6; i<=NF; i++) { notes = notes $i (i<NF ? " " : "") } print $1 "\t" notes}' > "$BACKUP_DIR/snap/snap-list.txt"
-
-if command -v flatpak >/dev/null 2>&1; then
-  echo "Saving flatpak application list..."
-  flatpak list --app --columns=application > "$BACKUP_DIR/snap/flatpak-list.txt"
-fi
-
-echo "Saving VS Code extensions..."
-if [ -n "$CODE_CMD" ] && [ -n "${HOME:-}" ] && [ -d "$HOME" ]; then
-  "$CODE_CMD" --list-extensions > "$BACKUP_DIR/vscode/extensions.txt" 2>/dev/null || true
-  if [ ! -s "$BACKUP_DIR/vscode/extensions.txt" ]; then
-    echo "VS Code extension backup produced no output."
+  if [ -f "$src" ]; then
+    cp "$src" "$sdest/unit"
+    ok "Service unit backed up: $unit"
+  else
+    warn "Service unit not found at $src — will not be restorable."
   fi
-else
-  echo "code command not found or HOME unavailable; skipping VS Code extension backup."
-fi
+  # Config files the service needs (env file, config dir, helper script, ...).
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    csrc="$(expand_path "$p")"
+    if [ ! -e "$csrc" ]; then
+      warn "  $unit: skip (path not found): $p"
+      continue
+    fi
+    mkdir -p "$sdest/home" "$sdest/root"
+    if [[ "$csrc" == "$HOME"* ]]; then
+      rel="${csrc#$HOME/}"
+      ( cd "$HOME" && rsync -aR "./$rel" "$sdest/home/" )
+    else
+      ( cd / && rsync -aR "./${csrc#/}" "$sdest/root/" )
+    fi
+    ok "  $unit: $p -> backups/services/$unit/"
+  done < <(yq -r ".services[] | select(.unit == \"$unit\") | .config_paths[]?" "$INVENTORY_FILE")
+done < <(yq -r '.services[] | [.unit, (.target // "system")] | @tsv' "$INVENTORY_FILE")
 
-echo "Backing up configs..."
-rsync -a "$HOME/.config/" "$BACKUP_DIR/configs/config/" 2>/dev/null || true
-rsync -a "$HOME/.ssh/" "$BACKUP_DIR/configs/ssh/" 2>/dev/null || true
-[ -f "$HOME/.gitconfig" ] && cp "$HOME/.gitconfig" "$BACKUP_DIR/configs/.gitconfig"
-rsync -a "$HOME/.local/share/code/" "$BACKUP_DIR/configs/local-share-code/" 2>/dev/null || true
-rsync -a "$HOME/.local/share/applications/" "$BACKUP_DIR/configs/local-share-applications/" 2>/dev/null || true
-
-echo "Backing up dotfiles..."
-for dotfile in .bashrc .profile .bash_aliases .bash_functions .zshrc .inputrc; do
-  if [ -e "$HOME/$dotfile" ]; then
-    cp -r "$HOME/$dotfile" "$BACKUP_DIR/dotfiles/"
+# --- Dotfiles --------------------------------------------------------------
+while IFS= read -r df; do
+  [ -n "$df" ] || continue
+  if [ -f "$HOME/$df" ]; then
+    cp "$HOME/$df" "$BACKUPS_DIR/dotfiles/$df"
+    ok "Dotfile backed up: $df"
+  else
+    warn "Dotfile missing: $df"
   fi
-done
+done < <(yaml_list '.dotfiles[]')
 
-echo "Backing up custom services..."
-sudo mkdir -p "$BACKUP_DIR/services/systemd"
-sudo cp -r /etc/systemd/system "$BACKUP_DIR/services/systemd/" 2>/dev/null || true
-systemctl list-unit-files --type=service --state=enabled --no-legend | awk '{print $1}' > "$BACKUP_DIR/services/enabled-services.txt"
-
-echo "Backing up application files..."
-rsync -a "$HOME/.vscode/" "$BACKUP_DIR/apps/vscode/" 2>/dev/null || true
-mkdir -p "$BACKUP_DIR/apps/package-json/home"
-find "$HOME/.config" "$HOME/.vscode" 2>/dev/null -type f -name package.json | while IFS= read -r file; do
-  dest="$BACKUP_DIR/apps/package-json/home${file#$HOME}"
-  mkdir -p "$(dirname "$dest")"
-  cp "$file" "$dest"
-done
-
-if [ -d /opt ]; then
-  echo "Backing up /opt application directories..."
-  sudo tar -czf "$BACKUP_DIR/apps/opt.tar.gz" -C /opt .
-  mkdir -p "$BACKUP_DIR/apps/package-json/opt"
-  find /opt -type f -name package.json 2>/dev/null | while IFS= read -r file; do
-    dest="$BACKUP_DIR/apps/package-json${file}"
-    mkdir -p "$(dirname "$dest")"
-    sudo cp "$file" "$dest"
-  done
-fi
-
-if [ -d /usr/local ]; then
-  echo "Backing up /usr/local application directories..."
-  sudo tar -czf "$BACKUP_DIR/apps/usr-local.tar.gz" -C /usr/local .
-fi
-
-echo "Backup complete."
+echo
+ok "Backup complete."
+echo "backups/ is git-ignored — copy it to safe storage (USB / another machine) to make"
+echo "restore.sh able to bring back your configuration on a fresh system."

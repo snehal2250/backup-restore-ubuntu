@@ -1,61 +1,110 @@
 # Backup-Restore-Ubuntu
 
-This repository contains a simple backup and restore workflow for Ubuntu system state, configuration, and application metadata. It is designed for an operator who wants to capture system packages, custom services, user configs, VS Code extensions, and important app files, then restore them on a fresh Ubuntu install.
+Rebuild your Ubuntu desktop to its last-known-good state — **without restoring binaries or
+packages from a backup**. This repo installs the apps you use from their recommended
+sources (latest stable versions) and then copies your *configuration* over them.
 
-## What is included
+## The idea
 
-- `backup.sh` - gathers package lists, apt sources, snaps, user config, custom services, app metadata, and package.json files into a repo-local `backup/` folder.
-- `restore.sh` - restores apt sources, apt package selections, snaps, VS Code extensions, configs, dotfiles, custom services, and archived `/opt` and `/usr/local` application directories.
-- `schedule_cron.sh` - installs a cron entry that runs `backup.sh` 15 minutes after reboot and saves its output to `backup/cron-backup.log`.
+A traditional backup copies files. This repo instead:
 
-## Operator view
+1. Knows **what you use** — from a single, hand-maintained file: `inventory/inventory.yaml`.
+2. `backup.sh` saves **only the configuration** of those apps (config folders, systemd
+   unit files, dotfiles).
+3. `restore.sh` **installs everything fresh** — `apt`, `snap`, `flatpak`, official
+   installers — and then overwrites them with your saved configuration.
 
-### Primary tasks
+> Example: you use **OpenCode**. The inventory says so. `backup.sh` saves
+> `~/.config/opencode`. On a fresh system, `restore.sh` runs
+> `curl -fsSL https://opencode.ai/install | bash` (latest version, official repo), then
+> restores your `~/.config/opencode` on top.
 
-- Run a manual backup:
-  ```bash
-  cd /home/vikram-athare/backup-restore-ubuntu
-  bash backup.sh
-  ```
+This is how you'd set up a new machine by hand — automated, and only for the things
+**you** installed on top of stock Ubuntu. No version pinning, no dependency guessing, no
+copying of the OS itself.
 
-- Run a manual restore:
-  ```bash
-  cd /home/vikram-athare/backup-restore-ubuntu
-  bash restore.sh
-  ```
+## Quick start
 
-- Install the cron-based scheduler:
-  ```bash
-  cd /home/vikram-athare/backup-restore-ubuntu
-  bash schedule_cron.sh
-  ```
+> **Prerequisite:** the scripts read the inventory with `yq`. `inventory.sh` and
+> `backup.sh` will offer to install it for you (`sudo snap install yq`); `restore.sh`
+> auto-installs it on a fresh system.
 
-### Verification
+```bash
+# 1. Declare what you use (your manual responsibility — this file is the source of truth)
+./inventory.sh                      # show current inventory
+./inventory.sh wizard               # guided: scan the system, declare apps one by one
+./inventory.sh add-app opencode     # opencode etc. are known in the built-in catalog
+./inventory.sh add-package apt git
+./inventory.sh add-service          # wizard for a custom service you installed
+./inventory.sh review               # suggest apps found on this system that you haven't declared
 
-- Verify that backups are being created in `backup/`.
-- Check the cron log after a test run:
-  ```bash
-  cat /home/vikram-athare/backup-restore-ubuntu/backup/cron-backup.log
-  ```
+# 2. Back up the configuration of everything declared
+./backup.sh                         # writes to backups/ (git-ignored)
 
-- Confirm the cron entry exists:
-  ```bash
-  crontab -l | grep backup-restore-ubuntu
-  ```
+# 3. On a fresh Ubuntu: restore (fresh install + your config)
+./restore.sh                        # prompts; --yes to skip, --dry-run to preview
+./restore.sh --upgrade-base         # OPT-IN: also apt full-upgrade of the base OS
 
-### Notes for operators
+# Keep everything current day-to-day
+./update_all_ubuntu.sh
+```
 
-- This repo is intended to preserve system and user environment state, not personal documents or code repos.
-- `backup.sh` writes into a local repository folder: `backup/`.
-- The cron job uses `@reboot` plus `sleep 900`, so it starts the backup 15 minutes after system boot.
-- The restore flow performs package and config restoration, but some manual review may still be required for service-specific settings.
+## Commands
 
-## Maintenance
+| Command | What it does | Safe to run |
+| --- | --- | --- |
+| `./inventory.sh list` | Show declared apps/packages/services + installed status | ✅ |
+| `./inventory.sh add-app <name>` | Interactive wizard to declare an app | ✅ |
+| `./inventory.sh add-package apt\|snap\|flatpak <name>` | Add a package to a list | ✅ |
+| `./inventory.sh add-service` | Interactive wizard to declare a custom service | ✅ |
+| `./inventory.sh remove-app/-package/-service` | Remove a declaration | ✅ |
+| `./inventory.sh review` | Suggest undeclared apps found on the system | ✅ |
+| `./inventory.sh wizard` | Guided flow: scan the system, declare apps one by one | ✅ |
+| `./backup.sh` | Capture configs + service units + dotfiles → `backups/` | ✅ |
+| `./restore.sh` | Fresh install + config restore (base OS upgrade is opt-in: `--upgrade-base`) | ⚠️ modifies system |
+| `./update_all_ubuntu.sh` | Update apt/snap/flatpak/npm + declared apps | ⚠️ modifies system |
+| `./schedule_cron.sh` | Install a @reboot scheduled backup | ⚠️ edits crontab |
 
-- Keep the repo under version control, but do not commit the `backup/` folder if it contains sensitive files.
-- If you modify the scripts, validate the restore process on a fresh system before relying on it for production recovery.
+## Layout
 
-## Important
+```
+inventory/inventory.yaml   the single source of truth (user-maintained)
+lib/common.sh              shared helpers for all scripts
+lib/catalog.sh             built-in knowledge of common apps (opencode, code, docker, ...)
+inventory.sh               the manual inventory tool
+backup.sh                  capture configuration -> backups/
+restore.sh                 fresh install + config overwrite
+update_all_ubuntu.sh       update everything
+schedule_cron.sh           scheduled backup after reboot
+backups/                   captured configuration (git-ignored — copy it to safe storage)
+```
 
-- `schedule_cron.sh` updates the current user’s crontab.
-- The scripts assume the repo is located at `/home/vikram-athare/backup-restore-ubuntu` and use paths relative to the repo root.
+## FAQ
+
+**Does restore copy packages from the backup?** No. Packages are installed fresh from
+Ubuntu repos / Snap Store / Flathub / official installers at their latest stable versions.
+Only configuration is copied.
+
+**What about dependencies?** Each app can declare its own dependencies (`depends_apt`) and
+they are installed automatically with the app. You never see them as separate inventory
+items — you only think about the main apps you use.
+
+**Which services are managed?** Only the custom services **you** declare in the inventory
+(unit files in `/etc/systemd/system` or `~/.config/systemd/user`). Default system services
+are never touched.
+
+**My custom service needs a config file or env file.** Declare it in the service's
+`config_paths` when you run `add-service` (or put it under the relevant app's
+`config_paths`). `backup.sh` captures it; `restore.sh` puts it back after installing the
+service.
+
+**Is `backups/` committed?** No — it's git-ignored (config can contain secrets). After
+`backup.sh`, copy `backups/` to a USB stick / another machine, or commit it explicitly.
+
+**Can I change versions?** The repo never pins versions. If you need an exact old version
+of something, this repo isn't the tool for it — that's a deliberate design choice.
+
+## For AI agents
+
+Read `AGENTS.md` first — it contains the mission, the non-negotiable principles, the
+inventory schema, and the coding conventions that every change must follow.

@@ -1,0 +1,49 @@
+# =============================================================================
+# inventory.yaml — THE single source of truth for this repo.
+#
+# This file is hand-maintained (via ./inventory.sh or directly). It declares ONLY
+# the main apps, packages, services and dotfiles the user installed on top of
+# stock Ubuntu. Dependencies of an app belong in that app's `depends_apt` — never
+# here as separate entries. No versions anywhere: restore always installs the
+# latest stable from the recommended source.
+#
+# Editing rules (see AGENTS.md for the full context):
+#   * apt_packages / snap_packages / flatpak_apps / dotfiles  -> one item per line
+#   * snap_packages supports the suffix ':classic' (e.g. code:classic)
+#   * apps:      install_type in apt|snap|snap-classic|flatpak|npm-global|pipx|cargo|script|custom
+#                script/custom requires install_command
+#                config_paths use '~' form and are the ONLY things backed up
+#   * services:  only CUSTOM services the user installed; target system|user
+# =============================================================================
+
+apt_packages:
+  # - git
+  # - curl
+
+snap_packages:
+  # - code:classic
+
+flatpak_apps:
+  # - org.gimp.GIMP
+
+dotfiles:
+  # - .bashrc
+  # - .gitconfig
+  # - .profile
+
+apps:
+  # - name: opencode
+  #   description: AI coding agent
+  #   install_type: script
+  #   install_command: curl -fsSL https://opencode.ai/install | bash
+  #   check_cmd: opencode
+  #   depends_apt:
+  #     - curl
+  #   config_paths:
+  #     - ~/.config/opencode
+
+services:
+  # - unit: myservice.service
+  #   target: system
+  #   enable: true
+  #   start: true
