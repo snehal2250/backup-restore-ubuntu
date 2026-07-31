@@ -82,10 +82,14 @@ require_yq() {
     else
       info "yq not found — installing it so the scripts can read inventory.yaml."
     fi
+    # yq is a hard prerequisite to even READ the inventory, so the install must
+    # actually run even under --dry-run (restore.sh's preview still parses
+    # inventory.yaml). Deliberately NOT wrapped in run(), which would only print
+    # the command in dry-run mode.
     if command -v snap >/dev/null 2>&1; then
-      run sudo snap install yq
+      sudo snap install yq
     elif command -v curl >/dev/null 2>&1; then
-      run sudo install -m 0755 -o root -g root \
+      sudo install -m 0755 -o root -g root \
         <(curl -fsSL "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64") \
         /usr/local/bin/yq
     else

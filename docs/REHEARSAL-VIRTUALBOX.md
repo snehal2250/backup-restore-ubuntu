@@ -60,7 +60,7 @@ Verify the kernel module + group:
 ```bash
 ls -l /dev/vboxdrv                  # want: crw-rw---- 1 root vboxusers ...
 getent group vboxusers              # want: vboxusers:x:...  (now exists)
-sudo usermod -aG vboxusers $USER    # add yourself — then LOG OUT & back in
+sudo usermod -aG vboxusers $USER    # add yourself — then FULL reboot (a logout may not refresh GUI sessions)
 ```
 
 > If `/dev/vboxdrv` is missing after install: `sudo dkms install virtualbox/7.1.x`
@@ -140,8 +140,11 @@ VBoxManage sharedfolder add "ubuntu-rehearsal" --name "snapshots" \
 ```bash
 # inside the VM:
 sudo apt update
-sudo apt install -y build-essential dkms linux-headers-$(uname -r)
+sudo apt install -y build-essential dkms perl tar bzip2 linux-headers-$(uname -r)
 ```
+
+> `perl`, `tar`, and `bzip2` are the build prerequisites the installer demands —
+> installing them up front avoids two known failures (see § 9).
 
 Then in the VirtualBox menu: **Devices → Insert Guest Additions CD image**, and run:
 
@@ -149,7 +152,9 @@ Then in the VirtualBox menu: **Devices → Insert Guest Additions CD image**, an
 sudo mount /dev/cdrom /mnt 2>/dev/null || sudo mount /dev/sr0 /mnt
 sudo /mnt/VBoxLinuxAdditions.run
 sudo usermod -aG vboxsf $USER     # grants access to shared folders
-# LOG OUT & back in, then:
+# FULL reboot — logout is NOT enough: /media/sf_* is root:vboxsf mode 770,
+# so only group members can open it, and the GUI file manager keeps the
+# pre-reboot session (and its denials) otherwise.
 ls /media/sf_snapshots            # the Storage mirror — live-mounted, in sync
 ls /media/sf_repo                 # the repo — live-mounted
 ```
@@ -190,7 +195,7 @@ tail -5 backups/backup-info.txt     # must show a 'status: ok' line
 
 ```bash
 cd ~/backup-restore-ubuntu
-./restore.sh --dry-run       # preview — execute nothing
+./restore.sh --dry-run       # preview — only yq auto-installs if missing
 ```
 
 Read every app: expect `already installed (found '...')` only for stock-Ubuntu items;
@@ -198,8 +203,9 @@ everything else prints the exact `apt`/`snap`/installer command that will run. C
 **Phase 4/5 services** lists `cloudflared` and its unit file exists in
 `backups/services/cloudflared.service/unit`.
 
-> `--dry-run` does **not** auto-install `yq` (by design). If it complains, run
-> `sudo snap install yq` then re-run the dry-run. A real run auto-installs yq itself.
+> `--dry-run` **auto-installs `yq`** just like a real run (a preview still needs to parse
+> the inventory), so no manual step is needed. If the auto-install fails (no `snap`, no
+> `curl`), install it yourself: `sudo snap install yq` and re-run the dry-run.
 
 Then the real thing:
 
@@ -255,7 +261,10 @@ path, just on real hardware with a newer snapshot.
 | --- | --- |
 | Guest OS list only shows "32-bit" | Hardware virtualization off in BIOS — enable SVM/VT-x (step 0) |
 | `/dev/vboxdrv` missing after install | `sudo dpkg --configure -a`; if still missing, `sudo dkms install virtualbox/7.1.x`; check `/var/lib/dkms/virtualbox/*/build/make.log` |
-| `/media/sf_*` not visible in guest | Guest Additions not installed (step 4b), or you're not in `vboxsf` — `sudo usermod -aG vboxsf $USER` then log out/in |
+| `/media/sf_*` not visible in guest | Guest Additions not installed (step 4b), or you're not in `vboxsf` — `sudo usermod -aG vboxsf $USER` then **full reboot** |
+| Shared folder mounted but **permission denied** when opening | First disambiguate: `mount \| grep vboxsf` — if nothing prints, it isn't actually mounted (re-add the share after a VM restart). If it IS mounted, `/media/sf_*` is `root:vboxsf` mode `770` — only group members can read it. `sudo usermod -aG vboxsf $USER`, then **full reboot** (logout alone is not enough; Nautilus also caches the denial — close and reopen Files). Instant test without rebooting: `newgrp vboxsf` |
+| Guest Additions asks to install `bzip2`/`tar` | Expected — the installer needs them to unpack its kernel-module sources. `sudo apt install -y tar bzip2` and re-run `/mnt/VBoxLinuxAdditions.run` |
+| Guest Additions: `make: not found` / "system is not currently set up to build kernel modules" | Build toolchain missing — `sudo apt install -y build-essential perl linux-headers-$(uname -r)`, then re-run `/mnt/VBoxLinuxAdditions.run`. The later "cannot reload kernel modules: one or more module(s) is still in use" line is **normal** — reboot to load the new modules |
 | Shared folder appears but empty | Share was added while the VM ran; `VBoxManage sharedfolder remove` + re-`add` after a VM restart |
-| `yq is required...` on dry-run | Expected — `--dry-run` never modifies the system. `sudo snap install yq` and re-run, or just run the real `./restore.sh --yes` |
+| `yq is required...` on dry-run | The auto-install failed (no `snap` and no `curl` on the VM). Install it: `sudo snap install yq`, then re-run the dry-run |
 | VM boots to a black screen after install | The ISO wasn't ejected — re-attach `emptydrive` (step 3) and reboot |

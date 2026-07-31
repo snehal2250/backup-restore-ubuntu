@@ -9,7 +9,7 @@
 # Usage:
 #   ./restore.sh                 # prompts before modifying the system
 #   ./restore.sh --yes           # skip prompts
-#   ./restore.sh --dry-run       # preview everything without executing
+#   ./restore.sh --dry-run       # preview; only yq auto-installs if missing
 #   ./restore.sh --upgrade-base  # ALSO apt full-upgrade the base OS (opt-in)
 # ---------------------------------------------------------------------------
 set -euo pipefail
@@ -31,7 +31,10 @@ while [ $# -gt 0 ]; do
 done
 
 [ -f "$INVENTORY_FILE" ] || die "Inventory file not found: $INVENTORY_FILE"
-require_yq "$([ "$DRY_RUN" = "0" ] && echo 1 || echo 0)"
+# yq is required to READ the inventory, so auto-install it even under --dry-run
+# (a preview still has to parse inventory.yaml; require_yq executes the install
+# directly, outside the run() dry-run wrapper, see lib/common.sh).
+require_yq 1
 require_cmd sudo
 
 # --- Preflight ------------------------------------------------------------
@@ -308,7 +311,7 @@ restore_user_dirs
 echo
 ok "Restore complete."
 if [ "$DRY_RUN" = "1" ]; then
-  echo "(dry run — nothing was executed)"
+  echo "(dry run — nothing else was executed; yq may have been auto-installed to read the inventory)"
   exit 0
 fi
 echo

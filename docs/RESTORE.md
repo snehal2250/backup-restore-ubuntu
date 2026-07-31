@@ -31,7 +31,7 @@ Flags:
 ```bash
 ./restore.sh                 # prompts before touching the system
 ./restore.sh --yes           # skip all prompts
-./restore.sh --dry-run       # preview everything, execute nothing
+./restore.sh --dry-run       # preview everything; only yq auto-installs if missing
 ./restore.sh --upgrade-base  # OPT-IN: also apt full-upgrade the base OS + autoremove
 ```
 
@@ -116,10 +116,10 @@ cp -a "$newest/." backups/
 
 ### 2.4 Check prerequisites
 - `sudo` — already required above.
-- `yq` — a real `restore.sh` run **auto-installs it** on a fresh system (via `snap` or a
-  download), so you normally don't need to do anything. Note: `--dry-run` does **not**
-  auto-install — if `yq` is missing it prints install instructions instead (that is
-  intentional: previews never modify the system).
+- `yq` — `restore.sh` **auto-installs it** on a fresh system (via `snap` or a download),
+  for both a real run **and** `--dry-run` (a preview still needs to parse the inventory),
+  so you normally don't need to do anything. If the auto-install fails (no `snap`, no
+  `curl`), install it manually: `sudo snap install yq`.
 - Network access to the repos the inventory uses (apt, Snap Store, Flathub, official
   installers).
 
@@ -434,8 +434,10 @@ snapshot.
 
 ## 8. Safety notes
 
-- `restore.sh` is **effectful** — it modifies the system. `--dry-run` previews it;
-  `--yes` skips the confirmation. Default restore touches **only** declared items.
+- `restore.sh` is **effectful** — it modifies the system. `--dry-run` previews it
+  (`--dry-run` still auto-installs `yq` if missing, since the preview must read the
+  inventory; nothing else is executed); `--yes` skips the confirmation. Default
+  restore touches **only** declared items.
 - `--upgrade-base` is the exception: it full-upgrades the entire base OS. Only use it when
   you intend that.
 - `backups/` contains personal configuration and possible secrets — never commit it, and
