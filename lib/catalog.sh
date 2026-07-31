@@ -197,5 +197,24 @@ depends_apt=nodejs npm
 config_paths=~/.config/manicode
 EOF
       ;;
+    cloudflared)
+      cat <<'EOF'
+description=Cloudflare Tunnel client (official apt repo)
+install_type=custom
+install_command=sudo mkdir -p --mode=0755 /usr/share/keyrings && curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null && echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main" | sudo tee /etc/apt/sources.list.d/cloudflared.list && sudo apt-get update && sudo apt-get install -y cloudflared
+check_cmd=cloudflared
+depends_apt=curl
+EOF
+      ;;
+    mongodb-compass)
+      cat <<'EOF'
+description=MongoDB GUI (official .deb, latest stable)
+install_type=custom
+install_command=DEB=$(curl -fsSL https://info-mongodb-com.s3.amazonaws.com/com-download-center/compass.json | grep -oE 'https://downloads.mongodb.com/compass/mongodb-compass_[0-9.]+_amd64.deb' | head -1) && [ -n "$DEB" ] && curl -fsSL -o /tmp/mongodb-compass.deb "$DEB" && sudo apt-get install -y /tmp/mongodb-compass.deb
+check_cmd=mongodb-compass
+depends_apt=curl
+config_paths=~/.config/MongoDB Compass
+EOF
+      ;;
   esac
 }

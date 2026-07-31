@@ -13,6 +13,8 @@
 #   ./inventory.sh remove-app <name>
 #   ./inventory.sh add-service              # interactive wizard
 #   ./inventory.sh remove-service <unit>
+#   ./inventory.sh add-user-dir <path>      # declare a whole user-data folder (e.g. ~/Documents)
+#   ./inventory.sh remove-user-dir <path>
 #   ./inventory.sh review                   # suggest undeclared apps found on this system
 #   ./inventory.sh wizard                   # guided: scan the system, declare apps one by one
 # ---------------------------------------------------------------------------
@@ -38,6 +40,8 @@ Commands:
   remove-app <name>                      Remove an app declaration
   add-service                            Declare a custom service (interactive wizard)
   remove-service <unit>                  Remove a service declaration (e.g. myservice.service)
+  add-user-dir <path>                    Declare a whole user-data folder (e.g. ~/Documents)
+  remove-user-dir <path>                 Remove a user-dir declaration
   review                                 Suggest apps found on this system, not yet declared
   wizard                                 Guided: scan the system and declare apps one by one
 EOF
@@ -99,6 +103,16 @@ cmd_list() {
     fi
   done < <(yaml_list '.apps[] | .name')
   echo
+  echo "=== User dirs ==="
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    if [ -d "$(expand_path "$d")" ]; then
+      echo "    [x] $d"
+    else
+      echo "    [ ] $d"
+    fi
+  done < <(yaml_list '.user_dirs[]')
+  echo
   echo "=== Services ==="
   while IFS=$'\t' read -r unit target; do
     [ -n "$unit" ] || continue
@@ -136,11 +150,11 @@ cmd_add_package() {
       name="$name:classic"
     fi
   fi
-  if yaml_list ".${key}[]" | grep -qx "$name"; then
+  if yaml_list ".${key}[]" | grep -Fqx "$name"; then
     warn "'$name' is already in the $key list."
     return 0
   fi
-  yq -i --arg p "$name" ".$key += [\$p]" "$INVENTORY_FILE"
+  P="$name" yq -i ".$key += [strenv(P)]" "$INVENTORY_FILE"
   ok "Added $type package '$name'."
 }
 
@@ -149,11 +163,11 @@ cmd_remove_package() {
   key="$(_package_key "$type")"
   [ -n "$key" ] || die "Package type must be apt, snap or flatpak."
   [ -n "$name" ] || die "Usage: ./inventory.sh remove-package $type <name>"
-  if ! yaml_list ".${key}[]" | grep -qx "$name"; then
+  if ! yaml_list ".${key}[]" | grep -Fqx "$name"; then
     warn "'$name' is not in the $key list."
     return 0
   fi
-  yq -i --arg p "$name" ".$key |= map(select(. != \$p))" "$INVENTORY_FILE"
+  P="$name" yq -i ".$key |= map(select(. != strenv(P)))" "$INVENTORY_FILE"
   ok "Removed $type package '$name'."
 }
 
@@ -176,7 +190,12 @@ write_app() {
     fi
     if [ -n "$paths" ]; then
       echo "  config_paths:"
-      for d in $paths; do printf '    - "%s"\n' "$(esc "$d")"; done
+      # paths is newline-delimited (see cmd_add_app) so entries containing
+      # spaces (e.g. ~/.config/MongoDB Compass) survive intact.
+      while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        printf '    - "%s"\n' "$(esc "$d")"
+      done <<< "$paths"
     fi
   } > "$tmp"
   yq -i '.apps += load("'"$tmp"'")' "$INVENTORY_FILE"
@@ -193,7 +212,12 @@ write_service() {
     printf '  start: %s\n' "$start"
     if [ -n "$paths" ]; then
       echo "  config_paths:"
-      for d in $paths; do printf '    - "%s"\n' "$(esc "$d")"; done
+      # paths is newline-delimited (see cmd_add_service) so entries containing
+      # spaces survive intact.
+      while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        printf '    - "%s"\n' "$(esc "$d")"
+      done <<< "$paths"
     fi
   } > "$tmp"
   yq -i '.services += load("'"$tmp"'")' "$INVENTORY_FILE"
@@ -208,7 +232,7 @@ cmd_add_app() {
   fi
   name="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9._-')"
   [ -n "$name" ] || die "Invalid app name."
-  if yaml_list '.apps[] | .name' | grep -qx "$name"; then
+  if yaml_list '.apps[] | .name' | grep -Fqx "$name"; then
     die "App '$name' is already in the inventory."
   fi
 
@@ -291,9 +315,9 @@ cmd_add_app() {
       for n in "${selected[@]}"; do
         c="${candidates[$((n - 1))]}"
         [ -n "$c" ] || continue
-        paths="$paths ${c/#$HOME\//~\/}"
+        paths+="${c/#$HOME\//~\/}"$'\n'
       done
-      paths="${paths# }"
+      paths="${paths%$'\n'}"
     fi
   fi
 
@@ -304,12 +328,11 @@ cmd_add_app() {
 cmd_remove_app() {
   local name="${1:-}"
   [ -n "$name" ] || die "Usage: ./inventory.sh remove-app <name>"
-  if ! yaml_list '.apps[] | .name' | grep -qx "$name"; then
+  if ! yaml_list '.apps[] | .name' | grep -Fqx "$name"; then
     warn "App '$name' is not in the inventory."
     return 0
   fi
-  # shellcheck disable=SC2016  # $n is a yq expression variable, not a shell var
-  yq -i --arg n "$name" '.apps |= map(select(.name != $n))' "$INVENTORY_FILE"
+  N="$name" yq -i '.apps |= map(select(.name != strenv(N)))' "$INVENTORY_FILE"
   ok "Removed app '$name'."
 }
 
@@ -321,7 +344,7 @@ cmd_add_service() {
   printf 'Unit file name (e.g. myservice.service): '
   read -r unit
   [ -n "$unit" ] || die "Unit name required."
-  if yaml_list '.services[] | .unit' | grep -qx "$unit"; then
+  if yaml_list '.services[] | .unit' | grep -Fqx "$unit"; then
     die "Service '$unit' is already in the inventory."
   fi
   echo "Where does this service live?"
@@ -355,10 +378,13 @@ cmd_add_service() {
   printf 'Config paths this service needs (space-separated, optional): '
   read -r paths
   if [ -n "$paths" ]; then
+    # newline-delimit so a path containing spaces survives intact. Note: input is
+    # space-split, so a service path that itself contains a space cannot be entered
+    # here — hand-edit inventory.yaml for that case.
     for p in $paths; do
-      norm="$norm ${p/#$HOME\//~\/}"
+      norm+="${p/#$HOME\//~\/}"$'\n'
     done
-    paths="${norm# }"
+    paths="${norm%$'\n'}"
   fi
 
   write_service "$unit" "$target" "$enable" "$start" "$paths"
@@ -368,13 +394,59 @@ cmd_add_service() {
 cmd_remove_service() {
   local unit="${1:-}"
   [ -n "$unit" ] || die "Usage: ./inventory.sh remove-service <unit>"
-  if ! yaml_list '.services[] | .unit' | grep -qx "$unit"; then
+  if ! yaml_list '.services[] | .unit' | grep -Fqx "$unit"; then
     warn "Service '$unit' is not in the inventory."
     return 0
   fi
-  # shellcheck disable=SC2016  # $u is a yq expression variable, not a shell var
-  yq -i --arg u "$unit" '.services |= map(select(.unit != $u))' "$INVENTORY_FILE"
+  U="$unit" yq -i '.services |= map(select(.unit != strenv(U)))' "$INVENTORY_FILE"
   ok "Removed service '$unit'."
+}
+
+# ---------------------------------------------------------------------------
+# add-user-dir / remove-user-dir — whole user-data folders (e.g. ~/Documents)
+# ---------------------------------------------------------------------------
+# Normalize a path to the '~' form used in inventory.yaml.
+_norm_dir() {
+  local p="$1"
+  p="${p%/}"   # strip a trailing slash: /home/u/Documents/ -> /home/u/Documents
+  case "$p" in
+    "$HOME"/*)
+      # shellcheck disable=SC2088  # literal '~/...' is the intentional inventory ~-form
+      p="~/${p#"$HOME"/}"
+      ;;
+    "$HOME") p="~" ;;
+    ~/*)     : ;;                 # already in ~-form (e.g. the user typed ~/Documents)
+    *)
+      warn "Path must start with ~ or \$HOME (got: '$p')." >&2
+      return 1
+      ;;
+  esac
+  printf '%s\n' "$p"
+}
+
+cmd_add_user_dir() {
+  local dir="${1:-}"
+  [ -n "$dir" ] || die "Usage: ./inventory.sh add-user-dir <path> (e.g. ~/Documents)"
+  dir="$(_norm_dir "$dir")" || die "Invalid path."
+  if yaml_list '.user_dirs[]' | grep -Fqx "$dir"; then
+    warn "'$dir' is already in the user_dirs list."
+    return 0
+  fi
+  [ -d "$(expand_path "$dir")" ] || warn "'$dir' does not exist yet — declared anyway (it will be captured once it exists)."
+  P="$dir" yq -i ".user_dirs += [strenv(P)]" "$INVENTORY_FILE"
+  ok "Added user dir '$dir'."
+}
+
+cmd_remove_user_dir() {
+  local dir="${1:-}"
+  [ -n "$dir" ] || die "Usage: ./inventory.sh remove-user-dir <path>"
+  dir="$(_norm_dir "$dir")" || die "Invalid path."
+  if ! yaml_list '.user_dirs[]' | grep -Fqx "$dir"; then
+    warn "'$dir' is not in the user_dirs list."
+    return 0
+  fi
+  P="$dir" yq -i ".user_dirs |= map(select(. != strenv(P)))" "$INVENTORY_FILE"
+  ok "Removed user dir '$dir'."
 }
 
 # ---------------------------------------------------------------------------
@@ -387,8 +459,8 @@ scan_candidates() {
   for d in "$HOME"/.config/*/; do
     [ -d "$d" ] || continue
     base="$(basename "$d")"
-    echo "$noise" | grep -qw "$base" && continue
-    yaml_list '.apps[] | .name' | grep -qx "$base" && continue
+    echo "$noise" | grep -Fw "$base" && continue
+    yaml_list '.apps[] | .name' | grep -Fqx "$base" && continue
     printf '%s\n' "$base"
   done
 }
@@ -438,6 +510,8 @@ case "$cmd" in
   remove-app)      shift; cmd_remove_app "$@" ;;
   add-service)     shift; cmd_add_service "$@" ;;
   remove-service)  shift; cmd_remove_service "$@" ;;
+  add-user-dir)    shift; cmd_add_user_dir "$@" ;;
+  remove-user-dir) shift; cmd_remove_user_dir "$@" ;;
   review)          shift; cmd_review "$@" ;;
   wizard)          shift; cmd_wizard "$@" ;;
   -h|--help|help)  usage ;;

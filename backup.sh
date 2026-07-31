@@ -7,6 +7,7 @@
 #   * config_paths of every declared app        (mirrored under backups/apps/<name>/)
 #   * unit file + config_paths of every service (backups/services/<unit>/unit + /home + /root)
 #   * declared dotfiles                         (backups/dotfiles/<name>)
+#   * declared user dirs (e.g. ~/Documents)     (backups/user-dirs/<name>/ — whole folders)
 #
 # Safe to run anytime. Output: backups/ (git-ignored) + backups/backup-info.txt
 # ---------------------------------------------------------------------------
@@ -19,7 +20,7 @@ YQ_AUTO=2   # interactive tool: if yq is missing, ask the user to install it
 [ -f "$INVENTORY_FILE" ] || die "Inventory file not found: $INVENTORY_FILE"
 require_yq "$YQ_AUTO"
 
-mkdir -p "$BACKUPS_DIR"/{apps,services,dotfiles}
+mkdir -p "$BACKUPS_DIR"/{apps,services,dotfiles,user-dirs}
 
 {
   echo "host: $(hostname)"
@@ -101,14 +102,36 @@ while IFS= read -r df; do
   fi
 done < <(yaml_list '.dotfiles[]')
 
+# --- User dirs: capture whole declared data folders (e.g. ~/Documents) -----
+while IFS= read -r d; do
+  [ -n "$d" ] || continue
+  src="$(expand_path "$d")"
+  if [ ! -d "$src" ]; then
+    warn "User dir not found: $d"
+    continue
+  fi
+  if [ "$src" = "$HOME" ]; then
+    warn "  skip (\$HOME itself cannot be a user dir): $d"
+    continue
+  fi
+  case "$src" in
+    "$HOME"/*) : ;;
+    *) warn "  skip (user_dirs must live under \$HOME): $d" ; continue ;;
+  esac
+  rel="${src#"$HOME"/}"
+  ( cd "$HOME" && rsync -aR "./$rel" "$BACKUPS_DIR/user-dirs/" )
+  ok "  $d -> backups/user-dirs/"
+done < <(yaml_list '.user_dirs[]')
+
 # --- Mirror to the configurable local-disk destination ----------------------
 # BACKUP_DEST (env-overridable) receives a full, unfiltered copy of backups/.
 # Only the newest $BACKUP_KEEP snapshots are kept there (rotation).
 mirror_backup() {
+  MIRROR_STATUS="disabled"
   [ -n "$BACKUP_DEST" ] || { info "BACKUP_DEST is empty — skipping local mirror."; return 0; }
   [[ "$BACKUP_KEEP" =~ ^[0-9]+$ ]] || BACKUP_KEEP=5
   if [ ! -d "$BACKUP_DEST" ]; then
-    mkdir -p "$BACKUP_DEST" 2>/dev/null || { warn "Cannot create $BACKUP_DEST — skipping mirror."; return 0; }
+    mkdir -p "$BACKUP_DEST" 2>/dev/null || { warn "Cannot create $BACKUP_DEST — skipping mirror."; MIRROR_STATUS="failed"; return 0; }
   fi
   # %N (nanoseconds) avoids two same-second runs colliding into one snapshot dir.
   local snap old
@@ -117,8 +140,10 @@ mirror_backup() {
   # --no-o --no-g: the destination may be NTFS/FAT where chown fails (rsync exit 23).
   if ! rsync -a --no-o --no-g "$BACKUPS_DIR/" "$snap/"; then
     warn "Mirror to $snap failed — keeping backups/ only."
+    MIRROR_STATUS="failed"
     return 0
   fi
+  MIRROR_STATUS="ok"
   ok "Mirrored to $snap"
   # Rotation: keep the newest $BACKUP_KEEP snapshots. Names are zero-padded
   # timestamps, so -r (descending) lexicographic order IS newest-first
@@ -129,6 +154,9 @@ mirror_backup() {
   while IFS= read -r old; do
     [ -n "$old" ] && old_snaps+=("$old")
   done < <(ls -1dr "$BACKUP_DEST"/backup-* 2>/dev/null)
+  # Remember the newest snapshot (old_snaps[0], the one we just created) so the
+  # success-marker refresh below can reuse it instead of re-listing the dir.
+  MIRROR_NEWEST="${old_snaps[0]:-}"
   if [ "${#old_snaps[@]}" -gt "$BACKUP_KEEP" ]; then
     local prune
     for prune in "${old_snaps[@]:$BACKUP_KEEP}"; do
@@ -139,6 +167,24 @@ mirror_backup() {
 }
 
 mirror_backup
+
+# --- Success marker ----------------------------------------------------------
+# backup-info.txt is (re)written at the START of a run, so on its own it cannot
+# prove the run COMPLETED. This block is appended only when the whole run
+# finished (captures + mirror). Therefore:
+#   * 'status: ok' present  -> the last run completed successfully
+#   * 'status: ok' absent   -> the last run did NOT complete (aborted mid-way)
+# The newest mirror snapshot gets the same file so the off-machine copy can be
+# verified identically (cp guarded so a failed mirror never clobbers an older
+# good snapshot's info).
+{
+  echo "status: ok"
+  echo "finished: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "mirror: ${MIRROR_STATUS:-unknown}"
+} >> "$BACKUPS_DIR/backup-info.txt"
+if [ "${MIRROR_STATUS:-}" = "ok" ] && [ -n "${MIRROR_NEWEST:-}" ]; then
+  cp "$BACKUPS_DIR/backup-info.txt" "$MIRROR_NEWEST/backup-info.txt"
+fi
 
 echo
 ok "Backup complete."

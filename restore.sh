@@ -241,8 +241,8 @@ restore_services() {
 
 restore_services
 
-# --- Phase 5: dotfiles ------------------------------------------------------
-info "Phase 5/5: dotfiles"
+# --- Phase 5: dotfiles + user dirs -------------------------------------------
+info "Phase 5/5: dotfiles & user dirs"
 
 restore_dotfiles() {
   local df
@@ -258,6 +258,37 @@ restore_dotfiles() {
 }
 
 restore_dotfiles
+
+# Whole user-data folders declared as user_dirs (e.g. ~/Documents).
+restore_user_dirs() {
+  local d rel src
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    if [ "$BACKUPS_PRESENT" != "1" ]; then
+      warn "  user dir '$d': no backups — skipping."
+      continue
+    fi
+    src="$(expand_path "$d")"
+    if [ "$src" = "$HOME" ]; then
+      warn "  user dir '$d': \$HOME itself cannot be restored this way — skipping."
+      continue
+    fi
+    case "$src" in
+      "$HOME"/*) : ;;
+      *) warn "  user dir '$d': not under \$HOME — skipping." ; continue ;;
+    esac
+    rel="${src#"$HOME"/}"
+    if [ -d "$BACKUPS_DIR/user-dirs/$rel" ]; then
+      run mkdir -p "$HOME/$rel"
+      run rsync -a "$BACKUPS_DIR/user-dirs/$rel/" "$HOME/$rel/"
+      ok "  user dir: $d restored"
+    else
+      warn "  user dir '$d': no backup in backups/user-dirs — skipping."
+    fi
+  done < <(yaml_list '.user_dirs[]')
+}
+
+restore_user_dirs
 
 # --- Wrap-up ---------------------------------------------------------------
 echo

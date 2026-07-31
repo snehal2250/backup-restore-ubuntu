@@ -36,6 +36,7 @@ copying of the OS itself.
 ./inventory.sh add-app opencode     # opencode etc. are known in the built-in catalog
 ./inventory.sh add-package apt git
 ./inventory.sh add-service          # wizard for a custom service you installed
+./inventory.sh add-user-dir ~/Documents   # declare a whole user-data folder (e.g. Documents)
 ./inventory.sh review               # suggest apps found on this system that you haven't declared
 
 # 2. Back up the configuration of everything declared
@@ -60,10 +61,11 @@ copying of the OS itself.
 | `./inventory.sh add-app <name>` | Interactive wizard to declare an app | ✅ |
 | `./inventory.sh add-package apt\|snap\|flatpak <name>` | Add a package to a list | ✅ |
 | `./inventory.sh add-service` | Interactive wizard to declare a custom service | ✅ |
-| `./inventory.sh remove-app/-package/-service` | Remove a declaration | ✅ |
+| `./inventory.sh add-user-dir <path>` | Declare a whole user-data folder (e.g. `~/Documents`) | ✅ |
+| `./inventory.sh remove-app/-package/-service/-user-dir` | Remove a declaration | ✅ |
 | `./inventory.sh review` | Suggest undeclared apps found on the system | ✅ |
 | `./inventory.sh wizard` | Guided flow: scan the system, declare apps one by one | ✅ |
-| `./backup.sh` | Capture configs + service units + dotfiles → `backups/`, mirror to `BACKUP_DEST` (keep last `BACKUP_KEEP`) | ✅ |
+| `./backup.sh` | Capture configs + service units + dotfiles + `user_dirs` → `backups/`, mirror to `BACKUP_DEST` (keep last `BACKUP_KEEP`); writes `status: ok` marker in `backup-info.txt` on success | ✅ |
 | `./restore.sh` | Fresh install + config restore (base OS upgrade is opt-in: `--upgrade-base`) | ⚠️ modifies system |
 | `./update_all_ubuntu.sh` | Update apt/snap/flatpak/npm + declared apps | ⚠️ modifies system |
 | `./schedule_cron.sh` | Install a @reboot scheduled backup | ⚠️ edits crontab |
@@ -93,6 +95,11 @@ Only configuration is copied.
 they are installed automatically with the app. You never see them as separate inventory
 items — you only think about the main apps you use.
 
+**How do I back up my Documents (or any folder)?** Declare it as a `user_dirs` entry
+(`./inventory.sh add-user-dir ~/Documents`). Unlike app config, these are whole
+user-data folders — `backup.sh` captures them in full under `backups/user-dirs/` and
+`restore.sh` puts them back wholesale.
+
 **Which services are managed?** Only the custom services **you** declare in the inventory
 (unit files in `/etc/systemd/system` or `~/.config/systemd/user`). Default system services
 are never touched.
@@ -101,6 +108,38 @@ are never touched.
 `config_paths` when you run `add-service` (or put it under the relevant app's
 `config_paths`). `backup.sh` captures it; `restore.sh` puts it back after installing the
 service.
+
+**How do I know the last backup succeeded?** `backup.sh` writes `backups/backup-info.txt`
+with run metadata at the START of every run, and appends a success marker **only when the
+whole run finishes**: `status: ok`, a `finished:` timestamp, and a `mirror:` line
+(`ok` / `failed` / `disabled`). So:
+
+```bash
+# local truth (after any ./backup.sh run or @reboot cron run):
+tail -5 backups/backup-info.txt      # expect a 'status: ok' line
+# quick yes/no:
+grep -q '^status: ok' backups/backup-info.txt && echo 'BACKUP OK' || echo 'BACKUP INCOMPLETE'
+
+# off-machine truth (the newest mirror snapshot carries the same file):
+newest=$(ls -1dr /media/vikram-athare/Storage/backup-restore-ubuntu/backup-* | head -1)
+tail -5 "$newest/backup-info.txt"
+```
+
+**Reading the marker combination:**
+
+| `backup-info.txt` | Meaning | What to do |
+| --- | --- | --- |
+| `status: ok` + `mirror: ok` | Run completed **and** off-machine copy is in place | nothing |
+| `status: ok` + `mirror: failed` | Config captured, but the off-machine copy **failed** | fix `BACKUP_DEST` (disk mounted? writable?) and re-run `./backup.sh` |
+| `status: ok` + `mirror: disabled` | Run completed; no off-machine copy (`BACKUP_DEST` unset) | nothing — expected if mirror is intentionally off |
+| no `status: ok` line | Last run did **not** complete (aborted mid-way) | check the run output/log for the error and re-run |
+
+> **Local vs. snapshot marker:** `backups/backup-info.txt` reflects the **last run** — a
+> fresh run truncates it immediately, and only a fully completed run re-appends `status: ok`.
+> The newest mirror snapshot only gets the marker on a **successful** run. So if the last
+> run aborted, the local file shows `status: ok` absent while the newest snapshot still
+> carries the previous (older) run's marker. Check the **local** file for the truth about
+> the most recent run; use a snapshot whose marker you verified locally first.
 
 **Is `backups/` committed?** No — it's git-ignored (config can contain secrets).
 `backup.sh` automatically mirrors the whole folder (no filtering) to the local disk at

@@ -22,9 +22,16 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 
 - `inventory/inventory.yaml` — schema with commented examples (apt/snap/flatpak lists,
   `apps:` with install_type/install_command/check_cmd/depends_apt/config_paths, `services:`
-  with unit/target/enable/start).
+  with unit/target/enable/start, `user_dirs:` for whole user-data folders).
 - `lib/catalog.sh` — seed catalog so `add-app` knows common apps out of the box
-  (opencode, VS Code, Docker, Chrome). Extend as the user adopts more apps.
+  (opencode, VS Code, Docker, Chrome, gh, gcloud, go, uv, tmux, terraform, ollama,
+  az, azurite, slack, onlyoffice, storage-explorer, ...). Extend as the user adopts
+  more apps.
+- **Live inventory: 23 apps + 1 service declared** (`inventory/inventory.yaml`).
+  Includes 4 install-method corrections that match how the user actually installed
+  the tool: gcloud→`snap-classic` (classic snap), gh→official GitHub apt repo,
+  go→official go.dev tarball,  uv→official astral installer (instead of pipx, which isn't installed on this system
+  and would have failed on a fresh restore).
 - `inventory.sh` — the manual tool: `list`, `add-package`, `remove-package`, `add-app`
   (wizard with catalog prefill + config-path detection), `add-service` (with optional
   `config_paths` for the service), `remove-app`, `remove-service`, `review` (suggests
@@ -33,13 +40,14 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 ## Phase 2 — Backup & Restore & Update (✅)
 
 - `backup.sh` — captures only declared configs (per app), service unit files + service
-  `config_paths`, and dotfiles into `backups/`; writes `backups/backup-info.txt`.
+  `config_paths`, dotfiles, and declared `user_dirs` (whole folders) into `backups/`;
+  writes `backups/backup-info.txt`.
 - `restore.sh` — preflight (Ubuntu check), `apt` update, fresh install of apt/snap/flatpak
   packages, per-app install (with deps + idempotency via `check_cmd`), service install +
-  enable/start + service config restore, config overwrite from `backups/`. Base OS
-  full-upgrade is OPT-IN via `--upgrade-base` (default touches only declared items). Flags:
-  `--dry-run`, `--yes`. Auto-installs `yq` on a fresh system; `inventory.sh`/`backup.sh`
-  ask before installing it.
+  enable/start + service config restore, config overwrite from `backups/`, and wholesale
+  restore of declared `user_dirs`. Base OS full-upgrade is OPT-IN via `--upgrade-base`
+  (default touches only declared items). Flags: `--dry-run`, `--yes`. Auto-installs `yq`
+  on a fresh system; `inventory.sh`/`backup.sh` ask before installing it.
 - `update_all_ubuntu.sh` — apt/snap/flatpak/npm + declared npm/pipx/cargo apps.
 - `schedule_cron.sh` + `.gitignore` updated for the new `backups/` layout.
 
@@ -70,8 +78,9 @@ commits:
 
 Since then the branch has grown in small follow-up commits: the `BACKUP_DEST` mirror
 feature, legacy-cleanup + cron dedup, more app declarations (cloudflared, google-chrome,
-fish, sqlitebrowser, stacer, sublime-text), a shellcheck hardening pass, and the
-`docs/RESTORE.md` runbook.
+fish, sqlitebrowser, stacer, sublime-text, freebuff), a shellcheck hardening pass, the
+`docs/RESTORE.md` runbook, and the inventory expansion to 23 apps (9 new apps + 4 install-
+method fixes, `98b7425`).
 
 Never commit `backups/` (git-ignored). `backup.sh` automatically mirrors it to the
 configured `BACKUP_DEST` (default `/media/vikram-athare/Storage/backup-restore-ubuntu`)

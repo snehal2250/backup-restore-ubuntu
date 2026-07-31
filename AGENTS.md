@@ -14,10 +14,12 @@ This repo restores the user's Ubuntu desktop back to its last-known-good state
 Instead:
 
 - A single user-maintained file, `inventory/inventory.yaml`, declares which
-  **applications, packages, services, and dotfiles** the user wants.
+  **applications, packages, services, dotfiles, and user-data folders** the user wants.
 - `backup.sh` captures **only the configuration** for those declared items
-  (config directories, systemd unit files, dotfiles) into a git-ignored `backups/` folder,
-  then mirrors the whole folder (no filtering) to a configurable local disk destination.
+  (config directories, systemd unit files, dotfiles) plus any whole **user-data
+  folders** the user declared (`user_dirs`, e.g. `~/Documents`) into a git-ignored
+  `backups/` folder, then mirrors the whole folder (no filtering) to a configurable
+  local disk destination.
 - `restore.sh` performs a **fresh install** of those items from their recommended sources
   (Ubuntu repositories, Snap Store, Flathub, official installers) at the **latest stable
   versions**, then **overwrites** them with the backed-up configuration.
@@ -40,7 +42,9 @@ your settings over it.
    --get-selections` state.
 2. **Configuration is the only thing copied.** The backup captures configuration for
    inventory items and nothing else: no binaries, no whole-`~/.config` dumps, no dpkg
-   databases, no home-directory bulk copying.
+   databases, no home-directory bulk copying. The one deliberate exception: whole
+   user-data folders a user explicitly declares under `user_dirs` (e.g. `~/Documents`)
+   are captured in full — those are user data, not app configuration.
 3. **The inventory is the single source of truth.** `inventory/inventory.yaml` is the only
    list of what to back up and install. Scripts must never hardcode user apps, package
    names, or services. The seed catalog in `lib/catalog.sh` may *suggest* install methods,
@@ -78,13 +82,16 @@ inventory/
   inventory.yaml          <- THE source of truth (user-maintained, git-tracked)
 lib/
   common.sh               <- shared helpers (logging, yq bootstrap, YAML getters, status checks)
-  catalog.sh              <- seed catalog of common apps (opencode, code, docker, chrome...)
+  catalog.sh              <- seed catalog of common apps (opencode, code, docker, chrome,
+                              gh, gcloud, go, uv, tmux, terraform, ollama, az, azurite,
+                              slack, onlyoffice, storage-explorer, cloudflared, ...)
 inventory.sh              <- MANUAL tool: list / add-* / remove-* / review / wizard
 backup.sh                 <- captures configs + service units + dotfiles -> backups/
 restore.sh                <- fresh install + config overwrite (--dry-run/--yes/--upgrade-base)
 update_all_ubuntu.sh      <- updates apt/snap/flatpak/npm + inventory apps
 schedule_cron.sh          <- @reboot scheduled backup
 backups/                  <- output of backup.sh (GIT-IGNORED; contains personal config)
+                             (apps/<name>/, services/<unit>/, dotfiles/, user-dirs/<name>/)
                            mirrored to BACKUP_DEST (default /media/vikram-athare/Storage/backup-restore-ubuntu)
                            (legacy backup/ folder from the old script was reviewed and
                            deleted; a 36 KB root-owned remnant still needs the user's
@@ -93,8 +100,10 @@ backups/                  <- output of backup.sh (GIT-IGNORED; contains personal
 
 ## 5. Inventory model (`inventory/inventory.yaml`)
 
-The file is plain YAML with four flat lists and two structured lists. See the file itself
-for the commented template.
+The file is plain YAML with four flat lists (plus `user_dirs`) and two structured lists.
+See the file itself for the commented template. The live inventory currently declares **23 apps + 1 service**
+(four of them — gcloud, gh, go, uv — use install methods corrected to match how the user
+actually installed each tool).
 
 ```yaml
 apt_packages:            # installed via: sudo apt-get install -y <item>
@@ -105,6 +114,8 @@ flatpak_apps:            # installed via: flatpak install -y flathub <item>
   - org.gimp.GIMP
 dotfiles:                # copied from/to $HOME (e.g. .bashrc, .gitconfig)
   - .bashrc
+user_dirs:               # WHOLE user-data folders captured/restored in full (e.g. Documents)
+  - ~/Documents          # user data, not app config — backed up whole, restored wholesale
 
 apps:                    # one entry per MAIN app. Dependencies are per-app, never separate.
   - name: opencode
@@ -116,12 +127,12 @@ apps:                    # one entry per MAIN app. Dependencies are per-app, nev
       - curl
     config_paths:                   # optional: backed up + restored (overwritten) for this app
       - ~/.config/opencode
-  - name: go                        # package: only for apt/snap/snap-classic/flatpak, when
-    install_type: apt               # the package name differs from the app name (here:
-    package: golang-go              # golang-go). The wizard prompts for it after you pick
-    check_cmd: go                   # the install method.
-    config_paths:
-      - ~/.config/go
+  - name: gcloud                    # package: only for apt/snap/snap-classic/flatpak, when
+    install_type: snap-classic      # the package name differs from the app name (here the
+    package: google-cloud-cli       # snap is google-cloud-cli; also e.g. onlyoffice ->
+    check_cmd: gcloud               # onlyoffice-desktopeditors). The wizard prompts for it
+    config_paths:                   # after you pick the install method.
+      - ~/.config/gcloud
 
 services:                # only CUSTOM services the user installed. Nothing default.
   - unit: myservice.service
@@ -140,9 +151,14 @@ Rules for agents editing the inventory:
   `cargo`, `script` (official installer), `custom` (arbitrary command). For `script`/
   `custom`, `install_command` is required.
 - Optional `package` overrides the package name for `apt`/`snap`/`snap-classic`/`flatpak`
-  installs when it differs from the app name (e.g. app `go` installs apt package
-  `golang-go`). The wizard prompts for it after the install method is chosen.
-- `config_paths` use `~` (tilde) form, not absolute `/home/...` paths, for portability.
+  installs when it differs from the app name (e.g. app `gcloud` installs snap
+  `google-cloud-cli`, app `onlyoffice` installs snap `onlyoffice-desktopeditors`). The
+  wizard prompts for it after the install method is chosen.
+- `config_paths` and `user_dirs` use `~` (tilde) form, not absolute `/home/...` paths,
+  for portability.
+- `user_dirs` entries are whole data folders (e.g. `~/Documents`); they are captured and
+  restored wholesale under `backups/user-dirs/` — this is the deliberate data-backup
+  exception to principle 2.
 - A custom service's runtime files (env file, config dir, helper script) belong in that
   service's `config_paths` (or the relevant app's `config_paths`). They are never
   auto-inferred from the unit file alone.
@@ -155,20 +171,24 @@ Rules for agents editing the inventory:
 ./inventory.sh add-app opencode     # wizard; catalog prefills opencode
 ./inventory.sh add-package apt git
 ./inventory.sh add-service          # wizard (unit file, target, enable/start, config paths)
+./inventory.sh add-user-dir ~/Documents   # declare a whole user-data folder
 ./inventory.sh list                 # see everything + installed status
 ./inventory.sh review               # suggests apps found on the system, not yet declared
 ./inventory.sh wizard               # guided: scan the system, declare apps one by one
 ```
 
-**Backup** (captures config for everything declared):
+**Backup** (captures config for everything declared, plus any `user_dirs`):
 ```bash
 ./backup.sh
 ```
 Output goes to `backups/` (git-ignored), then the whole folder is mirrored **without
 filtering** to `BACKUP_DEST` (env-overridable; default
 `/media/vikram-athare/Storage/backup-restore-ubuntu`), keeping only the newest
-`BACKUP_KEEP` (default 5) timestamped snapshots. `BACKUP_DEST=` disables the mirror.
-Never commit `backups/` (see docs/PLAN.md).
+`BACKUP_KEEP` (default 5) timestamped snapshots. On a successful run `backup.sh` appends
+a **success marker** (`status: ok` + `finished:` + `mirror:`) to `backups/backup-info.txt`
+— its absence means the run did NOT complete. The newest mirror snapshot carries the same
+file. See the README's "How do I know the last backup succeeded?" for the exact check
+commands. `BACKUP_DEST=` disables the mirror. Never commit `backups/` (see docs/PLAN.md).
 
 **Restore** (on a fresh Ubuntu install):
 ```bash
@@ -194,7 +214,9 @@ never upgrades the whole base OS unless `--upgrade-base` is passed.
 - **YAML is read with `yq`** (https://github.com/mikefarah/yq). `require_yq` follows
   `YQ_AUTO`: fail with install instructions (default), install silently (restore on a fresh
   system), or ask the user first (inventory.sh/backup.sh). Write YAML with `yq -i` and
-  `load()`/`--arg`/`env()` — never by string-concatenating user input into expressions.
+  `strenv(VAR)`/`load()`/`env()` — never by string-concatenating user input into
+  expressions. Note: the installed yq v4.53.3 does **not** support `--arg`; use
+  `strenv()` (or `env()`) with an inline `VAR=value` prefix instead.
 - **Never run `restore.sh` or `update_all_ubuntu.sh` on the user's machine without
   explicit permission.** `inventory.sh` only edits the inventory; `backup.sh` only writes
   to the git-ignored `backups/`. Both are safe. `restore.sh` modifies the system.

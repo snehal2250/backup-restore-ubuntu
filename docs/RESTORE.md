@@ -24,7 +24,7 @@ items for it, and the whole thing is **idempotent** — you can re-run it safely
 | 2/5 Packages | installs `apt_packages`, `snap_packages` (incl. `:classic`), `flatpak_apps` | the package lists |
 | 3/5 Apps | per app: installs `depends_apt`, then the app itself, then restores its config | `apps:` |
 | 4/5 Services | copies unit files, enables/starts them, restores their config | `services:` |
-| 5/5 Dotfiles | copies declared dotfiles to `$HOME` | `dotfiles:` |
+| 5/5 Dotfiles & user dirs | copies declared dotfiles to `$HOME`; restores whole `user_dirs` folders (e.g. `~/Documents`) | `dotfiles:` + `user_dirs:` |
 
 Flags:
 
@@ -47,7 +47,23 @@ Make sure the snapshot you are about to use is current:
 
 # 2. Capture the latest configuration
 ./backup.sh                  # writes backups/ AND mirrors it to BACKUP_DEST
+
+# 3. Confirm the last backup SUCCEEDED before you go (see "How do I know the
+#    last backup succeeded?" in README.md):
+tail -5 backups/backup-info.txt      # must contain a 'status: ok' line
+#   Also confirm the newest mirror snapshot carries the same marker:
+newest=$(ls -1dr /media/vikram-athare/Storage/backup-restore-ubuntu/backup-* | head -1)
+tail -5 "$newest/backup-info.txt"
 ```
+
+> If `backup-info.txt` has **no** `status: ok` line, the last run did not complete —
+> re-run `./backup.sh` and fix whatever it reports before restoring from a snapshot.
+>
+> **Local vs. snapshot marker:** the local `backups/backup-info.txt` reflects the **last
+> run** (a new run truncates it immediately; only a completed run re-appends `status: ok`).
+> The newest mirror snapshot only receives the marker on a successful run — so check the
+> **local** file for the truth about the most recent run, and only then verify the snapshot
+> you are about to restore from carries a matching marker.
 
 The mirror lives at `BACKUP_DEST` (default `/media/vikram-athare/Storage/backup-restore-ubuntu`)
 as timestamped snapshots, keeping the newest `BACKUP_KEEP` (default 5). The newest
@@ -158,8 +174,11 @@ app via its method (`apt`/`snap`/`snap-classic`/`flatpak`/`npm-global`/`pipx`/`c
 `/etc/systemd/system/` (system) or `~/.config/systemd/user/` (user), `daemon-reload` runs,
 then `enable`/`start` per the declaration, then its `config_paths` are restored.
 
-**Phase 5/5 — dotfiles.** Each declared dotfile is copied from `backups/dotfiles/` to
-`$HOME`.
+**Phase 5/5 — dotfiles & user dirs.** Each declared dotfile is copied from
+`backups/dotfiles/` to `$HOME`. Whole user-data folders declared in `user_dirs`
+(e.g. `~/Documents`) are restored wholesale from `backups/user-dirs/` back to `$HOME`.
+Declare them with `./inventory.sh add-user-dir ~/Documents`; `backup.sh` captures them
+in full (they are user data, not app config).
 
 Two failure behaviors, by design:
 
@@ -190,6 +209,18 @@ sudo reboot
 # 4. Keep everything current going forward
 ./update_all_ubuntu.sh
 ```
+
+**Apps whose state is NOT restored (by design) need a one-time manual step:**
+
+- **Slack, OnlyOffice, Storage Explorer** — snap GUI apps: re-login after first launch
+  (their login/state lives in snap revision dirs, which are not backed up).
+- **Ollama** — models are intentionally not backed up (many GB, reproducible): re-pull with
+  `ollama pull <model>` after restore.
+- Any app with no `config_paths` declared in the inventory is reinstalled fresh but starts
+  with defaults — check `./inventory.sh list` for entries missing `config_paths`.
+
+These are deliberate trade-offs (principle: config-only backup, no binaries/models), not
+mistakes — the inventory comments note each one.
 
 ---
 

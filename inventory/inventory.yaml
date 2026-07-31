@@ -8,7 +8,9 @@
 # latest stable from the recommended source.
 #
 # Editing rules (see AGENTS.md for the full context):
-#   * apt_packages / snap_packages / flatpak_apps / dotfiles  -> one item per line
+#   * apt_packages / snap_packages / flatpak_apps / dotfiles / user_dirs -> one item per line
+#   * user_dirs: whole folders the user wants captured (e.g. ~/Documents), '~' form.
+#     Unlike app config_paths these are user DATA, not app config — backed up whole.
 #   * snap_packages supports the suffix ':classic' (e.g. code:classic)
 #   * apps:      install_type in apt|snap|snap-classic|flatpak|npm-global|pipx|cargo|script|custom
 #                script/custom requires install_command
@@ -17,17 +19,21 @@
 #   * services:  only CUSTOM services the user installed; target system|user
 # =============================================================================
 
-apt_packages:
+apt_packages: []
 # - git
 # - curl
-snap_packages:
+snap_packages: []
 # - code:classic
-flatpak_apps:
+flatpak_apps: []
 # - org.gimp.GIMP
-dotfiles:
+dotfiles: []
 # - .bashrc
 # - .gitconfig
 # - .profile
+user_dirs:
+  - ~/Documents
+# - ~/Pictures
+# - ~/Desktop
 apps:
   - name: "opencode"
     description: "AI coding agent (opencode.ai)"
@@ -47,7 +53,7 @@ apps:
   - name: "gh"
     description: "GitHub CLI (official apt repo)"
     install_type: "custom"
-    install_command: "(type -p wget >/dev/null || (sudo apt-get update && sudo apt-get install -y wget)) && sudo mkdir -p -m 755 /etc/apt/keyrings && out=$(mktemp) && wget -nv -O $out https://cli.github.com/packages/githubcli-archive-keyring.gpg && cat $out | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null && sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && echo deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null && sudo apt-get update && sudo apt-get install -y gh"
+    install_command: "(type -p wget >/dev/null || (sudo apt-get update && sudo apt-get install -y wget)) && sudo mkdir -p -m 755 /etc/apt/keyrings && out=$(mktemp) && wget -nv -O $out https://cli.github.com/packages/githubcli-archive-keyring.gpg && cat $out | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null && sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null && sudo apt-get update && sudo apt-get install -y gh"
     check_cmd: "gh"
     depends_apt:
       - "wget"
