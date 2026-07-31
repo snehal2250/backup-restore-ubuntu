@@ -118,6 +118,19 @@ apps:
       - "wget"
     config_paths:
       - "~/.config/sublime-text"
+  - name: "freebuff"
+    description: "Freebuff AI coding assistant CLI (npm)"
+    # NOTE: full config dir per user choice — ~/.config/manicode holds login
+    # credentials (credentials.json), chat history, settings, AND a ~124MB
+    # bundled runtime binary. backups/ is git-ignored; do not "clean up" this
+    # path without asking the user.
+    install_type: "npm-global"
+    check_cmd: "freebuff"
+    depends_apt:
+      - "nodejs"
+      - "npm"
+    config_paths:
+      - "~/.config/manicode"
 # - name: opencode
 #   description: AI coding agent
 #   install_type: script

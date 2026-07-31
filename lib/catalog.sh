@@ -84,5 +84,14 @@ depends_apt=wget
 config_paths=~/.config/sublime-text
 EOF
       ;;
+    freebuff)
+      cat <<'EOF'
+description=Freebuff AI coding assistant CLI (npm)
+install_type=npm-global
+check_cmd=freebuff
+depends_apt=nodejs npm
+config_paths=~/.config/manicode
+EOF
+      ;;
   esac
 }
