@@ -23,6 +23,7 @@ install_command=curl -fsSL https://opencode.ai/install | bash
 check_cmd=opencode
 depends_apt=curl
 config_paths=~/.config/opencode
+exclude=node_modules
 EOF
       ;;
     code|vscode)
@@ -42,6 +43,7 @@ install_command=sudo apt-get update && sudo apt-get install -y ca-certificates c
 check_cmd=docker
 depends_apt=curl
 config_paths=~/.docker
+exclude=cli-plugins
 EOF
       ;;
     gh)
@@ -61,6 +63,7 @@ install_type=snap-classic
 package=google-cloud-cli
 check_cmd=gcloud
 config_paths=~/.config/gcloud
+exclude=logs
 EOF
       ;;
     go)
@@ -71,6 +74,7 @@ install_command=VER=$(curl -fsSL https://go.dev/VERSION?m=text | head -1) && cur
 check_cmd=go
 depends_apt=curl
 config_paths=~/.config/go
+exclude=telemetry
 EOF
       ;;
     uv)
@@ -97,6 +101,7 @@ description=HashiCorp Terraform IaC CLI
 install_type=snap-classic
 check_cmd=terraform
 config_paths=~/.terraform.d
+exclude=checkpoint_cache checkpoint_signature
 EOF
       ;;
     ollama)
@@ -114,6 +119,7 @@ install_command=curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
 check_cmd=az
 depends_apt=curl
 config_paths=~/.azure
+exclude=cliextensions logs telemetry commands
 EOF
       ;;
     azurite)
@@ -189,6 +195,7 @@ install_command=sudo mkdir -p /etc/apt/keyrings && wget -qO - https://download.s
 check_cmd=sublime_text
 depends_apt=wget
 config_paths=~/.config/sublime-text
+exclude=Log
 EOF
       ;;
     freebuff)
@@ -218,6 +225,7 @@ install_command=DEB=$(curl -fsSL https://info-mongodb-com.s3.amazonaws.com/com-d
 check_cmd=mongodb-compass
 depends_apt=curl
 config_paths=~/.config/MongoDB Compass
+exclude=Cache GPUCache DawnWebGPUCache DawnGraphiteCache
 EOF
       ;;
   esac

@@ -216,9 +216,13 @@ sudo reboot
   (their login/state lives in snap revision dirs, which are not backed up).
 - **Ollama** — models are intentionally not backed up (many GB, reproducible): re-pull with
   `ollama pull <model>` after restore.
-- **Apps with `exclude:` lists** (VS Code, Google Chrome, Freebuff) — excluded caches,
-  model stores, and bundled binaries are not captured, so they are not restored either;
-  they regenerate (or re-download) on first launch. Only real configuration comes back.
+- **Apps with `exclude:` lists** (VS Code, Google Chrome, Freebuff, Docker, Azure CLI,
+  MongoDB Compass, ...) — excluded caches, model stores, bundled binaries, and installed
+  extensions are not captured, so they are not restored either; they regenerate (or
+  re-download) on first launch. Only real configuration comes back.
+- **Azure CLI extensions** (`az` `cliextensions`, e.g. `azure-devops`) — installed
+  extension packages are excluded as binaries; re-add what you use with
+  `az extension add -n <name>` after restore. Credentials and profile ARE restored.
 - Any app with no `config_paths` declared in the inventory is reinstalled fresh but starts
   with defaults — check `./inventory.sh list` for entries missing `config_paths`.
 

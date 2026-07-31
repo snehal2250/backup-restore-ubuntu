@@ -46,6 +46,9 @@ apps:
       - "curl"
     config_paths:
       - "~/.config/opencode"
+    # node_modules is the app's installed runtime dependencies — re-installed with the app.
+    exclude:
+      - "node_modules"
   - name: "code"
     description: "Visual Studio Code"
     install_type: "snap-classic"
@@ -74,6 +77,8 @@ apps:
     check_cmd: "gcloud"
     config_paths:
       - "~/.config/gcloud"
+    exclude:
+      - "logs"
     package: google-cloud-cli
   - name: "go"
     description: "Go toolchain (official go.dev tarball)"
@@ -84,6 +89,8 @@ apps:
       - "curl"
     config_paths:
       - "~/.config/go"
+    exclude:
+      - "telemetry"
   - name: "uv"
     description: "Python package manager (official installer)"
     install_type: "custom"
@@ -109,6 +116,12 @@ apps:
       - "curl"
     config_paths:
       - "~/.config/MongoDB Compass"
+    # Electron caches regenerate on launch; real settings live in Local Storage/AppPreferences.
+    exclude:
+      - "Cache"
+      - "GPUCache"
+      - "DawnWebGPUCache"
+      - "DawnGraphiteCache"
   - name: "google-chrome"
     description: "Google Chrome web browser"
     install_type: "custom"
@@ -156,6 +169,8 @@ apps:
       - "wget"
     config_paths:
       - "~/.config/sublime-text"
+    exclude:
+      - "Log"
   - name: "freebuff"
     description: "Freebuff AI coding assistant CLI (npm)"
     # NOTE: ~/.config/manicode holds login credentials (credentials.json),
@@ -185,6 +200,9 @@ apps:
       - "curl"
     config_paths:
       - "~/.docker"
+    # cli-plugins are downloaded plugin binaries (buildx, compose) — re-downloaded with the app.
+    exclude:
+      - "cli-plugins"
   - name: "tmux"
     description: "Terminal multiplexer (apt)"
     install_type: "apt"
@@ -197,6 +215,10 @@ apps:
     check_cmd: "terraform"
     config_paths:
       - "~/.terraform.d"
+    # checkpoint_* are update-check caches that regenerate; credentials.tfrc.json IS captured.
+    exclude:
+      - "checkpoint_cache"
+      - "checkpoint_signature"
   - name: "ollama"
     description: "Local LLM runner (snap)"
     # NOTE: LLM models are NOT backed up (many GB, reproducible) — re-pull after restore.
@@ -211,6 +233,13 @@ apps:
       - "curl"
     config_paths:
       - "~/.azure"
+    # cliextensions are installed extension packages (re-add with 'az extension add');
+    # logs/telemetry/commands are regenerable. Credentials + profile ARE captured.
+    exclude:
+      - "cliextensions"
+      - "logs"
+      - "telemetry"
+      - "commands"
   - name: "azurite"
     description: "Azure Storage emulator (npm)"
     install_type: "npm-global"
