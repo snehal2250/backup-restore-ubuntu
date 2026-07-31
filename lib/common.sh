@@ -14,9 +14,12 @@ set -euo pipefail
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$LIB_DIR/.." && pwd)"
 INVENTORY_FILE="$REPO_ROOT/inventory/inventory.yaml"
+# shellcheck disable=SC2034  # consumed by backup.sh / restore.sh after sourcing
 BACKUPS_DIR="$REPO_ROOT/backups"
 # Local-disk mirror destination for backup.sh (env-overridable; empty string disables).
-BACKUP_DEST="${BACKUP_DEST:-/media/vikram-athare/Storage/backup-restore-ubuntu}"
+# NOTE: use "-" (not ":-"): an empty BACKUP_DEST must stay empty so backup.sh
+# skips the mirror, per the documented "BACKUP_DEST= disables" semantics.
+BACKUP_DEST="${BACKUP_DEST-/media/vikram-athare/Storage/backup-restore-ubuntu}"
 # Keep at most this many timestamped snapshots in BACKUP_DEST.
 BACKUP_KEEP="${BACKUP_KEEP:-5}"
 
@@ -97,7 +100,7 @@ require_yq() {
 # --- YAML access (requires yq) -------------------------------------------
 # yaml_get QUERY  -> prints a scalar (empty string if absent)
 yaml_get() {
-  require_yq
+  require_yq "$YQ_AUTO"
   yq -r "$1 // \"\"" "$INVENTORY_FILE"
 }
 
@@ -107,13 +110,13 @@ yaml_get() {
 # NOTE: no '// []' fallback either — on an empty/null list yq v4 prints a literal
 # '[]' line, which callers would treat as a real list item.
 yaml_list() {
-  require_yq
+  require_yq "$YQ_AUTO"
   yq -r "$1" "$INVENTORY_FILE"
 }
 
 # app_get NAME QUERY -> scalar attribute of one app (empty if absent)
 app_get() {
-  require_yq
+  require_yq "$YQ_AUTO"
   yq -r ".apps[] | select(.name == \"$1\") | $2 // \"\"" "$INVENTORY_FILE"
 }
 

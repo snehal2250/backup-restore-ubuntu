@@ -17,7 +17,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 YQ_AUTO=2   # interactive tool: if yq is missing, ask the user to install it
 
 [ -f "$INVENTORY_FILE" ] || die "Inventory file not found: $INVENTORY_FILE"
-require_yq
+require_yq "$YQ_AUTO"
 
 mkdir -p "$BACKUPS_DIR"/{apps,services,dotfiles}
 
@@ -44,7 +44,7 @@ while IFS= read -r name; do
       continue
     fi
     if [[ "$src" == "$HOME"* ]]; then
-      rel="${src#$HOME/}"
+      rel="${src#"$HOME"/}"
       ( cd "$HOME" && rsync -aR "./$rel" "$dest/home/" )
     else
       ( cd / && rsync -aR "./${src#/}" "$dest/root/" )
@@ -81,7 +81,7 @@ while IFS=$'\t' read -r unit target; do
     fi
     mkdir -p "$sdest/home" "$sdest/root"
     if [[ "$csrc" == "$HOME"* ]]; then
-      rel="${csrc#$HOME/}"
+      rel="${csrc#"$HOME"/}"
       ( cd "$HOME" && rsync -aR "./$rel" "$sdest/home/" )
     else
       ( cd / && rsync -aR "./${csrc#/}" "$sdest/root/" )

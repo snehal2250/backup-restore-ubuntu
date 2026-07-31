@@ -19,6 +19,7 @@
 set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
+# shellcheck disable=SC1091  # sourced helper library, not an executable script
 source "$LIB_DIR/catalog.sh"
 
 YQ_AUTO=2   # interactive tool: if yq is missing, ask the user to install it
@@ -72,11 +73,11 @@ print_plain_list() {
         if [ -e "$HOME/$base" ]; then echo "    [x] $item"; else echo "    [ ] $item"; fi
         ;;
     esac
-  done < <(yaml_list ".$key[]")
+  done < <(yaml_list ".${key}[]")
 }
 
 cmd_list() {
-  require_yq
+  require_yq "$YQ_AUTO"
   echo "Inventory: $INVENTORY_FILE"
   echo
   echo "=== Packages ==="
@@ -135,7 +136,7 @@ cmd_add_package() {
       name="$name:classic"
     fi
   fi
-  if yaml_list ".$key[]" | grep -qx "$name"; then
+  if yaml_list ".${key}[]" | grep -qx "$name"; then
     warn "'$name' is already in the $key list."
     return 0
   fi
@@ -148,7 +149,7 @@ cmd_remove_package() {
   key="$(_package_key "$type")"
   [ -n "$key" ] || die "Package type must be apt, snap or flatpak."
   [ -n "$name" ] || die "Usage: ./inventory.sh remove-package $type <name>"
-  if ! yaml_list ".$key[]" | grep -qx "$name"; then
+  if ! yaml_list ".${key}[]" | grep -qx "$name"; then
     warn "'$name' is not in the $key list."
     return 0
   fi
@@ -307,6 +308,7 @@ cmd_remove_app() {
     warn "App '$name' is not in the inventory."
     return 0
   fi
+  # shellcheck disable=SC2016  # $n is a yq expression variable, not a shell var
   yq -i --arg n "$name" '.apps |= map(select(.name != $n))' "$INVENTORY_FILE"
   ok "Removed app '$name'."
 }
@@ -370,6 +372,7 @@ cmd_remove_service() {
     warn "Service '$unit' is not in the inventory."
     return 0
   fi
+  # shellcheck disable=SC2016  # $u is a yq expression variable, not a shell var
   yq -i --arg u "$unit" '.services |= map(select(.unit != $u))' "$INVENTORY_FILE"
   ok "Removed service '$unit'."
 }
@@ -391,7 +394,7 @@ scan_candidates() {
 }
 
 cmd_review() {
-  require_yq
+  require_yq "$YQ_AUTO"
   echo "Apps found on this system that are NOT declared in the inventory:"
   echo
   while IFS= read -r base; do
@@ -407,7 +410,7 @@ cmd_review() {
 }
 
 cmd_wizard() {
-  require_yq
+  require_yq "$YQ_AUTO"
   echo "Wizard — declare apps found on this system, one at a time:"
   echo
   local base declared=0

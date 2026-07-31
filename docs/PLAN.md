@@ -44,11 +44,17 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 
 ## Phase 3 — Hardening & validation (⬜ next)
 
-- Run `shellcheck` on all scripts; fix findings.
+- ✅ Ran `shellcheck` (v0.10.0) on all scripts; fixed findings (SC1087 braces,
+  SC2318 `local` split, SC2295 quoted `$HOME` patterns) and silenced intentional
+  patterns (SC2034/SC2119/SC2120 cross-file globals, SC2016 yq expression vars,
+  SC1091 sourced libs).
 - Validate the full flow in a disposable VM: fresh Ubuntu → `restore.sh` → verify apps,
   configs, services; run it twice to prove idempotency.
 - Test `--dry-run` output is accurate end-to-end.
-- Decide and document how the user will carry `backups/` off-machine (USB / remote git).
+- ✅ Decided & documented: `backups/` is carried off-machine via the configurable
+  `BACKUP_DEST` mirror (default `/media/vikram-athare/Storage/backup-restore-ubuntu`),
+  keeping the last `BACKUP_KEEP` snapshots (`BACKUP_DEST=` disables). See "Commit
+  strategy" below.
 
 ## Commit strategy
 

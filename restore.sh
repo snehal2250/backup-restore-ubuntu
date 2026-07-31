@@ -124,7 +124,8 @@ install_flatpak_apps
 info "Phase 3/5: apps"
 
 restore_app_config() {
-  local name="$1" dir="$BACKUPS_DIR/apps/$name"
+  local name="$1"
+  local dir="$BACKUPS_DIR/apps/$name"
   [ "$BACKUPS_PRESENT" = "1" ] || return 0
   if [ -d "$dir/home" ]; then
     run rsync -a "$dir/home/" "$HOME/"
