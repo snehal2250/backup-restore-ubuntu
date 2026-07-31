@@ -34,10 +34,114 @@ EOF
       ;;
     docker)
       cat <<'EOF'
-description=Docker container runtime
-install_type=apt
+description=Docker Engine + CLI (official Docker apt repo)
+install_type=custom
+install_command=sudo apt-get update && sudo apt-get install -y ca-certificates curl && sudo install -m 0755 -d /etc/apt/keyrings && sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc && sudo chmod a+r /etc/apt/keyrings/docker.asc && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(grep VERSION_CODENAME /etc/os-release | cut -d= -f2) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null && sudo apt-get update && sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 check_cmd=docker
+depends_apt=curl
 config_paths=~/.docker
+EOF
+      ;;
+    gh)
+      cat <<'EOF'
+description=GitHub CLI (official apt repo)
+install_type=custom
+install_command=(type -p wget >/dev/null || (sudo apt-get update && sudo apt-get install -y wget)) && sudo mkdir -p -m 755 /etc/apt/keyrings && out=$(mktemp) && wget -nv -O $out https://cli.github.com/packages/githubcli-archive-keyring.gpg && cat $out | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null && sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null && sudo apt-get update && sudo apt-get install -y gh
+check_cmd=gh
+depends_apt=wget
+config_paths=~/.config/gh
+EOF
+      ;;
+    gcloud)
+      cat <<'EOF'
+description=Google Cloud CLI (classic snap)
+install_type=snap-classic
+package=google-cloud-cli
+check_cmd=gcloud
+config_paths=~/.config/gcloud
+EOF
+      ;;
+    go)
+      cat <<'EOF'
+description=Go toolchain (official go.dev tarball)
+install_type=custom
+install_command=VER=$(curl -fsSL https://go.dev/VERSION?m=text | head -1) && curl -fsSL -o /tmp/go.tar.gz https://go.dev/dl/${VER}.linux-$(dpkg --print-architecture).tar.gz && sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf /tmp/go.tar.gz && sudo ln -sf /usr/local/go/bin/go /usr/local/bin/go
+check_cmd=go
+depends_apt=curl
+config_paths=~/.config/go
+EOF
+      ;;
+    uv)
+      cat <<'EOF'
+description=Python package manager (official installer)
+install_type=custom
+install_command=curl -LsSf https://astral.sh/uv/install.sh | sh
+check_cmd=uv
+depends_apt=curl
+config_paths=~/.config/uv
+EOF
+      ;;
+    tmux)
+      cat <<'EOF'
+description=Terminal multiplexer (apt)
+install_type=apt
+check_cmd=tmux
+config_paths=~/.tmux.conf
+EOF
+      ;;
+    terraform)
+      cat <<'EOF'
+description=HashiCorp Terraform IaC CLI
+install_type=snap-classic
+check_cmd=terraform
+config_paths=~/.terraform.d
+EOF
+      ;;
+    ollama)
+      cat <<'EOF'
+description=Local LLM runner (snap) — models NOT backed up
+install_type=snap
+check_cmd=ollama
+EOF
+      ;;
+    az)
+      cat <<'EOF'
+description=Microsoft Azure CLI (official MS apt repo)
+install_type=custom
+install_command=curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+check_cmd=az
+depends_apt=curl
+config_paths=~/.azure
+EOF
+      ;;
+    azurite)
+      cat <<'EOF'
+description=Azure Storage emulator (npm)
+install_type=npm-global
+check_cmd=azurite
+depends_apt=nodejs npm
+EOF
+      ;;
+    slack)
+      cat <<'EOF'
+description=Slack desktop (snap)
+install_type=snap
+check_cmd=slack
+EOF
+      ;;
+    onlyoffice)
+      cat <<'EOF'
+description=OnlyOffice desktop editors (snap)
+install_type=snap
+package=onlyoffice-desktopeditors
+check_cmd=onlyoffice-desktopeditors
+EOF
+      ;;
+    storage-explorer)
+      cat <<'EOF'
+description=Azure Storage Explorer (snap)
+install_type=snap
+check_cmd=storage-explorer
 EOF
       ;;
     google-chrome|chrome)
