@@ -91,7 +91,7 @@ newest=$(ls -1dr /media/vikram-athare/Storage/backup-restore-ubuntu/backup-* | h
 cp -a "$newest/." backups/
 
 # or pick a specific snapshot explicitly:
-#   ls -1r /media/vikram-athare/Storage/backup-restore-ubuntu/
+#   ls -1dr /media/vikram-athare/Storage/backup-restore-ubuntu/backup-*
 #   cp -a "/media/vikram-athare/Storage/backup-restore-ubuntu/backup-YYYYMMDD-HHMMSS.../." backups/
 ```
 

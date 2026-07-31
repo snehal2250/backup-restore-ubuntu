@@ -86,7 +86,9 @@ update_all_ubuntu.sh      <- updates apt/snap/flatpak/npm + inventory apps
 schedule_cron.sh          <- @reboot scheduled backup
 backups/                  <- output of backup.sh (GIT-IGNORED; contains personal config)
                            mirrored to BACKUP_DEST (default /media/vikram-athare/Storage/backup-restore-ubuntu)
-                           (legacy backup/ folder from the old script was reviewed and deleted)
+                           (legacy backup/ folder from the old script was reviewed and
+                           deleted; a 36 KB root-owned remnant still needs the user's
+                           final 'sudo rm -rf backup')
 ```
 
 ## 5. Inventory model (`inventory/inventory.yaml`)

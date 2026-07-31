@@ -15,7 +15,8 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 - Dotfiles included as an optional inventory list. Only user-declared custom services.
 - Legacy `backup/` folder from the old script was reviewed and deleted (its contents were
   superseded by `backups/` + the `BACKUP_DEST` mirror; SSH keys were verified identical to
-  `~/.ssh` before deletion).
+  `~/.ssh` before deletion). A 36 KB root-owned remnant still needs the user's final
+  `sudo rm -rf backup` to finish the cleanup.
 
 ## Phase 1 — Inventory (✅)
 
@@ -58,15 +59,19 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 
 ## Commit strategy
 
-Land changes in small, reviewable commits. This re-architecture lands as two commits:
+Land changes in small, reviewable commits. The re-architecture **started** with two
+commits:
 
 1. **Commit 1 — architecture.** The full toolchain (`inventory.sh`, `backup.sh`,
    `restore.sh`, `update_all_ubuntu.sh`, `lib/`, `AGENTS.md`, `README.md`, `docs/`,
    `.gitignore`) with `inventory/inventory.yaml` containing only commented examples.
-2. **Commit 2 — real inventory.** Landed once the user has declared their real
-   apps/packages/services via `./inventory.sh wizard` / `add-app` / `add-package` /
-   `add-service`. Contains the populated `inventory/inventory.yaml` plus the
+2. **Commit 2 — real inventory.** The populated `inventory/inventory.yaml` plus the
    `package:` schema support (and related fixes) the real inventory required.
+
+Since then the branch has grown in small follow-up commits: the `BACKUP_DEST` mirror
+feature, legacy-cleanup + cron dedup, more app declarations (cloudflared, google-chrome,
+fish, sqlitebrowser, stacer, sublime-text), a shellcheck hardening pass, and the
+`docs/RESTORE.md` runbook.
 
 Never commit `backups/` (git-ignored). `backup.sh` automatically mirrors it to the
 configured `BACKUP_DEST` (default `/media/vikram-athare/Storage/backup-restore-ubuntu`)

@@ -43,8 +43,15 @@ else
   warn "Cannot determine the OS (/etc/os-release missing)."
 fi
 
+# backups/ counts as present only if it holds a real artifact (backup-info.txt written
+# by backup.sh, or at least one captured file). An EMPTY dir — e.g. after a failed
+# snapshot copy on a fresh machine — must not silently suppress the warning below.
 BACKUPS_PRESENT=0
-[ -d "$BACKUPS_DIR" ] && BACKUPS_PRESENT=1
+if [ -f "$BACKUPS_DIR/backup-info.txt" ]; then
+  BACKUPS_PRESENT=1
+elif [ -d "$BACKUPS_DIR" ] && [ -n "$(find "$BACKUPS_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+  BACKUPS_PRESENT=1
+fi
 if [ "$BACKUPS_PRESENT" = "0" ]; then
   warn "No backups/ found — packages will still be installed, but configuration cannot be restored."
 fi
