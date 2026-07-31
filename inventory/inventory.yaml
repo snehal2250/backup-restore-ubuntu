@@ -66,11 +66,25 @@ apps:
     check_cmd: "uv"
     config_paths:
       - "~/.config/uv"
+  - name: "cloudflared"
+    description: "Cloudflare Tunnel client (official apt repo)"
+    install_type: "custom"
+    install_command: "sudo mkdir -p --mode=0755 /usr/share/keyrings && curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null && echo \"deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main\" | sudo tee /etc/apt/sources.list.d/cloudflared.list && sudo apt-get update && sudo apt-get install -y cloudflared"
+    check_cmd: "cloudflared"
   - name: "mongodb-compass"
-    install_type: "snap"
+    description: "MongoDB GUI (official .deb, latest stable)"
+    install_type: "custom"
+    install_command: "DEB=$(curl -fsSL https://info-mongodb-com.s3.amazonaws.com/com-download-center/compass.json | grep -oE 'https://downloads.mongodb.com/compass/mongodb-compass_[0-9.]+_amd64.deb' | head -1) && [ -n \"$DEB\" ] && curl -fsSL -o /tmp/mongodb-compass.deb \"$DEB\" && sudo apt-get install -y /tmp/mongodb-compass.deb"
     check_cmd: "mongodb-compass"
     config_paths:
-      - ~/.config/MongoDB Compass
+      - "~/.config/MongoDB Compass"
+  - name: "google-chrome"
+    description: "Google Chrome web browser"
+    install_type: "custom"
+    install_command: "wget -q -O /tmp/google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && sudo apt-get install -y /tmp/google-chrome.deb"
+    check_cmd: "google-chrome"
+    config_paths:
+      - "~/.config/google-chrome"
 # - name: opencode
 #   description: AI coding agent
 #   install_type: script
@@ -88,6 +102,13 @@ apps:
 #   config_paths:
 #     - ~/.config/go
 services:
+  - unit: "cloudflared.service"
+    target: system
+    enable: true
+    start: true
+    config_paths:
+      - "/etc/cloudflared/config.yml"
+      - "~/.cloudflared"
 # - unit: myservice.service
 #   target: system
 #   enable: true
