@@ -220,9 +220,16 @@ sudo reboot
   MongoDB Compass, ...) — excluded caches, model stores, bundled binaries, and installed
   extensions are not captured, so they are not restored either; they regenerate (or
   re-download) on first launch. Only real configuration comes back.
-- **Azure CLI extensions** (`az` `cliextensions`, e.g. `azure-devops`) — installed
-  extension packages are excluded as binaries; re-add what you use with
-  `az extension add -n <name>` after restore. Credentials and profile ARE restored.
+- **Azure CLI extensions** (`az` `cliextensions`) — installed extension packages are
+  excluded as binaries; re-add what you use with `az extension add -n <name>` after
+  restore. Credentials and profile ARE restored.
+
+  Current extension list captured on 2026-07-31 (re-verify with `az extension list`;
+  `az extension add` installs the latest — the version below is informational only):
+
+    ```bash
+    az extension add -n azure-devops   # v1.0.6 in use at capture time
+    ```
 - Any app with no `config_paths` declared in the inventory is reinstalled fresh but starts
   with defaults — check `./inventory.sh list` for entries missing `config_paths`.
 
@@ -241,7 +248,52 @@ exercise the real path (fresh install → config overwrite → services up).
 
 Cost: ~1–2 hours + a few GB of disk. Plan for it once.
 
-### 6.1 Make a fresh backup on your working machine first
+### 6.1 Pre-rehearsal hardware checklist (run once, on the real machine)
+
+The rehearsal creates a real VM, so the machine that runs it needs a working hypervisor
+with hardware acceleration. Do this **once** on the working machine (not inside a
+prep/CI environment — the VM needs your actual hardware):
+
+**1. Install a hypervisor.** VirtualBox is the recommended option for this rehearsal:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y virtualbox virtualbox-ext-pack virtualbox-dkms
+# alternatives (any hypervisor works — the repo is hypervisor-agnostic):
+#   sudo apt-get install -y gnome-boxes
+#   sudo apt-get install -y qemu-kvm libvirt-daemon-system virt-manager
+```
+
+> `virtualbox-dkms` rebuilds the `vboxdrv` module automatically on kernel updates —
+> without it, VirtualBox can stop working after a kernel upgrade.
+
+**2. Enable hardware virtualization in the BIOS.** The setting is named **SVM Mode** on
+AMD boards (this machine: Gigabyte B550M K) or **Intel VT-x** on Intel. It is off by
+default on many boards, and no hypervisor gets hardware acceleration until it is on:
+
+- Reboot and tap **Del** to enter the BIOS; switch to Advanced mode with **F2**;
+  **Tweaker/M.I.T. → Advanced CPU Settings → SVM Mode → Enabled**; save with **F10**.
+- If acceleration still does not work after that, also disable **Secure Boot** and/or
+  load the module manually: VirtualBox → `sudo modprobe vboxdrv`; KVM →
+  `sudo modprobe kvm_amd` (Intel: `kvm_intel`).
+
+**3. Verify acceleration is live** (after rebooting back into Ubuntu):
+
+```bash
+# VirtualBox (recommended) — uses its OWN kernel module, NOT /dev/kvm:
+lsmod | grep vboxdrv                     # expect: vboxdrv ...
+sudo usermod -aG vboxusers "$USER"       # then log out/in once for it to apply
+# KVM/Boxes instead — expect /dev/kvm to exist:
+#   ls -l /dev/kvm                       # expect: crw-rw---- 1 root kvm ...
+#   sudo systemctl enable --now libvirtd
+#   sudo usermod -aG libvirt "$USER"
+```
+
+> **Why this matters:** without hardware acceleration (SVM/AMD-V), the hypervisor falls
+> back to slow software emulation — the rehearsal still works but can take 20–40× longer.
+> Get acceleration working before you start.
+
+### 6.2 Make a fresh backup on your working machine first
 
 ```bash
 ./backup.sh
@@ -249,13 +301,13 @@ tail -5 backups/backup-info.txt        # must show a 'status: ok' line
 ```
 Use this newest snapshot as the rehearsal's config source.
 
-### 6.2 Create the disposable VM
+### 6.3 Create the disposable VM
 
 - Any local hypervisor: GNOME Boxes, VirtualBox, or virt-manager/KVM. Free.
 - Install a **stock Ubuntu, same major release** as your working machine, complete the
   first-boot setup. The first user must have sudo (the default user does).
 
-### 6.3 Get the repo + config onto the VM
+### 6.4 Get the repo + config onto the VM
 
 The Storage disk holds only `backup-*` snapshots (the mirror of `backups/`), **not** the
 repo — bring the repo via git clone or a copy of the folder (same as section 2.2), then
@@ -267,7 +319,7 @@ newest=$(ls -1dr /media/vikram-athare/Storage/backup-restore-ubuntu/backup-* | h
 cp -a "$newest/." backups/
 ```
 
-### 6.4 Preview
+### 6.5 Preview
 
 ```bash
 ./restore.sh --dry-run
@@ -278,7 +330,7 @@ ships; everything else should print the exact `apt`/`snap`/`npm`/installer comma
 will run. Also confirm Phase 4 lists your custom services and their unit files exist in
 `backups/services/<unit>/unit`.
 
-### 6.5 Run the restore for real
+### 6.6 Run the restore for real
 
 ```bash
 ./restore.sh --yes
@@ -288,7 +340,7 @@ will run. Also confirm Phase 4 lists your custom services and their unit files e
 
 `yq` auto-installs on the fresh system, so no manual step is needed.
 
-### 6.6 Reboot and verify
+### 6.7 Reboot and verify
 
 ```bash
 sudo reboot
@@ -305,7 +357,7 @@ Also re-do the **section 5** manual steps here and confirm they work: Slack/Only
 `ollama pull <model>`, and `az extension add -n <name>` for any Azure CLI extensions — the
 rehearsal is the right time to discover those need a working network/account, not later.
 
-### 6.7 Idempotency check (the important one)
+### 6.8 Idempotency check (the important one)
 
 Run the restore a second time:
 
@@ -316,7 +368,7 @@ Run the restore a second time:
 Everything should report `already installed` or skip; nothing should break, duplicate,
 or error. This proves re-runs are safe (principle 6).
 
-### 6.8 What to do with failures
+### 6.9 What to do with failures
 
 - A **custom/script installer** that fails prints a warning and restore **continues** —
   note which app, fix its `install_command` in the inventory, re-run.
@@ -324,7 +376,7 @@ or error. This proves re-runs are safe (principle 6).
 - **Missing config?** Check the app declares `config_paths` in the inventory and that
   `backup.sh` captured it (the app appears under `backups/apps/<name>/`).
 
-### 6.9 Done — delete the VM
+### 6.10 Done — delete the VM
 
 The VM is disposable: shut it down and delete it. The point was to prove the mechanics
 work. Keep this checklist in mind for the real restore — the real one just uses a newer
