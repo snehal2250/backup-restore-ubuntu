@@ -18,7 +18,10 @@ mkdir -p "$SCRIPT_DIR/backups"
 TMPFILE="$SCRIPT_DIR/schedule_cron.tmp"
 trap 'rm -f "$TMPFILE"' EXIT
 
-crontab -l 2>/dev/null | grep -v -F "$CRON_MARK" > "$TMPFILE" || true
+# Remove any previous entry: the marker line AND the @reboot command line (which
+# contains the backup script path). Filtering only the marker would leave the old
+# command behind and re-running would stack duplicate @reboot jobs.
+crontab -l 2>/dev/null | grep -v -F "$CRON_MARK" | grep -v -F "$BACKUP_SCRIPT" > "$TMPFILE" || true
 {
   cat "$TMPFILE"
   echo "$CRON_MARK"
@@ -28,7 +31,8 @@ crontab -l 2>/dev/null | grep -v -F "$CRON_MARK" > "$TMPFILE" || true
 echo "Cron job installed."
 echo "@reboot job will run 15 minutes after reboot and append logs to $LOGFILE."
 echo "Note: the scheduled run only captures configuration (see backup.sh)."
-echo "Remember to copy backups/ to safe storage after running backup.sh."
+echo "Each run also mirrors backups/ to \$BACKUP_DEST (default: /media/vikram-athare/Storage/backup-restore-ubuntu),"
+echo "keeping the last \$BACKUP_KEEP (default 5) snapshots."
 echo "Installed entry:"
 echo "$CRON_CMD"
 echo "Verify with: crontab -l | grep backup-restore-ubuntu"

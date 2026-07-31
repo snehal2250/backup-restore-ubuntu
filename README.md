@@ -39,7 +39,9 @@ copying of the OS itself.
 ./inventory.sh review               # suggest apps found on this system that you haven't declared
 
 # 2. Back up the configuration of everything declared
-./backup.sh                         # writes to backups/ (git-ignored)
+./backup.sh                         # writes to backups/ AND mirrors it to BACKUP_DEST
+#   (default BACKUP_DEST=/media/vikram-athare/Storage/backup-restore-ubuntu,
+#    full unfiltered copy, last 5 snapshots kept — override with env vars)
 
 # 3. On a fresh Ubuntu: restore (fresh install + your config)
 ./restore.sh                        # prompts; --yes to skip, --dry-run to preview
@@ -60,7 +62,7 @@ copying of the OS itself.
 | `./inventory.sh remove-app/-package/-service` | Remove a declaration | ✅ |
 | `./inventory.sh review` | Suggest undeclared apps found on the system | ✅ |
 | `./inventory.sh wizard` | Guided flow: scan the system, declare apps one by one | ✅ |
-| `./backup.sh` | Capture configs + service units + dotfiles → `backups/` | ✅ |
+| `./backup.sh` | Capture configs + service units + dotfiles → `backups/`, mirror to `BACKUP_DEST` (keep last `BACKUP_KEEP`) | ✅ |
 | `./restore.sh` | Fresh install + config restore (base OS upgrade is opt-in: `--upgrade-base`) | ⚠️ modifies system |
 | `./update_all_ubuntu.sh` | Update apt/snap/flatpak/npm + declared apps | ⚠️ modifies system |
 | `./schedule_cron.sh` | Install a @reboot scheduled backup | ⚠️ edits crontab |
@@ -76,7 +78,8 @@ backup.sh                  capture configuration -> backups/
 restore.sh                 fresh install + config overwrite
 update_all_ubuntu.sh       update everything
 schedule_cron.sh           scheduled backup after reboot
-backups/                   captured configuration (git-ignored — copy it to safe storage)
+backups/                   captured configuration (git-ignored)
+                           mirrored to BACKUP_DEST (default /media/vikram-athare/Storage/backup-restore-ubuntu)
 ```
 
 ## FAQ
@@ -98,8 +101,11 @@ are never touched.
 `config_paths`). `backup.sh` captures it; `restore.sh` puts it back after installing the
 service.
 
-**Is `backups/` committed?** No — it's git-ignored (config can contain secrets). After
-`backup.sh`, copy `backups/` to a USB stick / another machine, or commit it explicitly.
+**Is `backups/` committed?** No — it's git-ignored (config can contain secrets).
+`backup.sh` automatically mirrors the whole folder (no filtering) to the local disk at
+`BACKUP_DEST` (default `/media/vikram-athare/Storage/backup-restore-ubuntu`), keeping
+only the newest `BACKUP_KEEP` (default 5) snapshots. Set `BACKUP_DEST`/`BACKUP_KEEP`
+as env vars to override (e.g. `BACKUP_DEST=  ./backup.sh` disables the mirror).
 
 **Can I change versions?** The repo never pins versions. If you need an exact old version
 of something, this repo isn't the tool for it — that's a deliberate design choice.

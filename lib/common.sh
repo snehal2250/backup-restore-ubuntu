@@ -15,6 +15,10 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$LIB_DIR/.." && pwd)"
 INVENTORY_FILE="$REPO_ROOT/inventory/inventory.yaml"
 BACKUPS_DIR="$REPO_ROOT/backups"
+# Local-disk mirror destination for backup.sh (env-overridable; empty string disables).
+BACKUP_DEST="${BACKUP_DEST:-/media/vikram-athare/Storage/backup-restore-ubuntu}"
+# Keep at most this many timestamped snapshots in BACKUP_DEST.
+BACKUP_KEEP="${BACKUP_KEEP:-5}"
 
 DRY_RUN=0   # set to 1 by scripts that support --dry-run (restore.sh)
 

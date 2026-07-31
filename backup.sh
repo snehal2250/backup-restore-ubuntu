@@ -101,7 +101,46 @@ while IFS= read -r df; do
   fi
 done < <(yaml_list '.dotfiles[]')
 
+# --- Mirror to the configurable local-disk destination ----------------------
+# BACKUP_DEST (env-overridable) receives a full, unfiltered copy of backups/.
+# Only the newest $BACKUP_KEEP snapshots are kept there (rotation).
+mirror_backup() {
+  [ -n "$BACKUP_DEST" ] || { info "BACKUP_DEST is empty — skipping local mirror."; return 0; }
+  [[ "$BACKUP_KEEP" =~ ^[0-9]+$ ]] || BACKUP_KEEP=5
+  if [ ! -d "$BACKUP_DEST" ]; then
+    mkdir -p "$BACKUP_DEST" 2>/dev/null || { warn "Cannot create $BACKUP_DEST — skipping mirror."; return 0; }
+  fi
+  # %N (nanoseconds) avoids two same-second runs colliding into one snapshot dir.
+  local snap old
+  snap="$BACKUP_DEST/backup-$(date +%Y%m%d-%H%M%S%N)"
+  info "Mirroring backups/ -> $snap (no filtering)"
+  # --no-o --no-g: the destination may be NTFS/FAT where chown fails (rsync exit 23).
+  if ! rsync -a --no-o --no-g "$BACKUPS_DIR/" "$snap/"; then
+    warn "Mirror to $snap failed — keeping backups/ only."
+    return 0
+  fi
+  ok "Mirrored to $snap"
+  # Rotation: keep the newest $BACKUP_KEEP snapshots. Names are zero-padded
+  # timestamps, so -r (descending) lexicographic order IS newest-first
+  # chronological order — never sort by mtime (-t), which is unreliable when
+  # snapshots share a creation second. Slicing [@]:$BACKUP_KEEP then drops the
+  # newest KEEP and prunes the rest (the OLDER snapshots).
+  local -a old_snaps=()
+  while IFS= read -r old; do
+    [ -n "$old" ] && old_snaps+=("$old")
+  done < <(ls -1dr "$BACKUP_DEST"/backup-* 2>/dev/null)
+  if [ "${#old_snaps[@]}" -gt "$BACKUP_KEEP" ]; then
+    local prune
+    for prune in "${old_snaps[@]:$BACKUP_KEEP}"; do
+      rm -rf "$prune"
+      warn "Pruned old snapshot: $prune"
+    done
+  fi
+}
+
+mirror_backup
+
 echo
 ok "Backup complete."
-echo "backups/ is git-ignored — copy it to safe storage (USB / another machine) to make"
-echo "restore.sh able to bring back your configuration on a fresh system."
+echo "backups/ is git-ignored. Mirror status above — BACKUP_DEST=${BACKUP_DEST:-<disabled>},"
+echo "keeping the last ${BACKUP_KEEP} snapshot(s)."

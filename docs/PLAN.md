@@ -13,7 +13,9 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   `backups/` (git-ignored captured config).
 - Single YAML inventory chosen (with `yq` as the one tool dependency).
 - Dotfiles included as an optional inventory list. Only user-declared custom services.
-- Legacy `backup/` folder from the old script is git-ignored pending deletion.
+- Legacy `backup/` folder from the old script was reviewed and deleted (its contents were
+  superseded by `backups/` + the `BACKUP_DEST` mirror; SSH keys were verified identical to
+  `~/.ssh` before deletion).
 
 ## Phase 1 — Inventory (✅)
 
@@ -38,8 +40,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   `--dry-run`, `--yes`. Auto-installs `yq` on a fresh system; `inventory.sh`/`backup.sh`
   ask before installing it.
 - `update_all_ubuntu.sh` — apt/snap/flatpak/npm + declared npm/pipx/cargo apps.
-- `schedule_cron.sh` + `.gitignore` updated for the new `backups/` layout (and the legacy
-  `backup/` folder is ignored too).
+- `schedule_cron.sh` + `.gitignore` updated for the new `backups/` layout.
 
 ## Phase 3 — Hardening & validation (⬜ next)
 
@@ -61,13 +62,13 @@ Land changes in small, reviewable commits. This re-architecture lands as two com
    `add-service`. Contains the populated `inventory/inventory.yaml` plus the
    `package:` schema support (and related fixes) the real inventory required.
 
-Never commit `backups/` or the legacy `backup/` folder (both git-ignored). To carry
-`backups/` off-machine, copy it to a USB stick / another machine rather than committing it.
+Never commit `backups/` (git-ignored). `backup.sh` automatically mirrors it to the
+configured `BACKUP_DEST` (default `/media/vikram-athare/Storage/backup-restore-ubuntu`)
+keeping the last `BACKUP_KEEP` snapshots; set `BACKUP_DEST=` to disable the mirror.
 
 ## Phase 4 — Future enhancements (⬜ backlog)
 
 - Grow the seed catalog (`lib/catalog.sh`) as the user adopts apps.
-- Delete the legacy `backup/` folder from disk once its contents have been reviewed.
 - Optional git-crypt or age-based encryption for committing `backups/`.
 - Optional `restore.sh --configs-only` / `--packages-only` sub-phases.
 - Optional integrity check (`restore.sh --verify`) comparing declared inventory vs system.

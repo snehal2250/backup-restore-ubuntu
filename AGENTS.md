@@ -16,7 +16,8 @@ Instead:
 - A single user-maintained file, `inventory/inventory.yaml`, declares which
   **applications, packages, services, and dotfiles** the user wants.
 - `backup.sh` captures **only the configuration** for those declared items
-  (config directories, systemd unit files, dotfiles) into a git-ignored `backups/` folder.
+  (config directories, systemd unit files, dotfiles) into a git-ignored `backups/` folder,
+  then mirrors the whole folder (no filtering) to a configurable local disk destination.
 - `restore.sh` performs a **fresh install** of those items from their recommended sources
   (Ubuntu repositories, Snap Store, Flathub, official installers) at the **latest stable
   versions**, then **overwrites** them with the backed-up configuration.
@@ -83,7 +84,8 @@ restore.sh                <- fresh install + config overwrite (--dry-run/--yes/-
 update_all_ubuntu.sh      <- updates apt/snap/flatpak/npm + inventory apps
 schedule_cron.sh          <- @reboot scheduled backup
 backups/                  <- output of backup.sh (GIT-IGNORED; contains personal config)
-backup/                   <- LEGACY folder from the old script (also GIT-IGNORED; delete once reviewed)
+                           mirrored to BACKUP_DEST (default /media/vikram-athare/Storage/backup-restore-ubuntu)
+                           (legacy backup/ folder from the old script was reviewed and deleted)
 ```
 
 ## 5. Inventory model (`inventory/inventory.yaml`)
@@ -159,8 +161,11 @@ Rules for agents editing the inventory:
 ```bash
 ./backup.sh
 ```
-Output goes to `backups/` (git-ignored). The user should copy `backups/` to safe storage
-(a USB stick or another machine). Never commit `backups/` (see docs/PLAN.md).
+Output goes to `backups/` (git-ignored), then the whole folder is mirrored **without
+filtering** to `BACKUP_DEST` (env-overridable; default
+`/media/vikram-athare/Storage/backup-restore-ubuntu`), keeping only the newest
+`BACKUP_KEEP` (default 5) timestamped snapshots. `BACKUP_DEST=` disables the mirror.
+Never commit `backups/` (see docs/PLAN.md).
 
 **Restore** (on a fresh Ubuntu install):
 ```bash
