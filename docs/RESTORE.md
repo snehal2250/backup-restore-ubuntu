@@ -62,16 +62,17 @@ Install a stock Ubuntu (same major release is ideal) and complete first-boot set
 The target user **must have sudo rights** (the default first user does).
 
 ### 2.2 Get the repo onto the machine
-The repo carries the scripts + the inventory. Get it and your configuration onto the new
-machine. Either clone from your remote, or copy the folder from the Storage disk:
+The repo carries the scripts + the inventory. Get it onto the new machine **from a
+source that contains the repo itself** — the Storage disk only holds `backup-*` config
+snapshots (the mirror of `backups/`), not the repo:
 
 ```bash
 # Option A: git clone (if you keep this repo on a remote)
 git clone <your-remote> ~/backup-restore-ubuntu
 cd ~/backup-restore-ubuntu
 
-# Option B: copy from the Storage mirror
-cp -r /media/vikram-athare/Storage/backup-restore-ubuntu ~/backup-restore-ubuntu
+# Option B: copy the repo folder from the old machine (USB stick, network share...)
+cp -r <path-to-repo-on-old-machine> ~/backup-restore-ubuntu
 cd ~/backup-restore-ubuntu
 ```
 
@@ -82,13 +83,15 @@ newest mirror snapshot on the Storage disk:
 
 ```bash
 # Copy ONLY the newest snapshot's contents into backups/
-# (the backup-* glob is NOT sorted newest-first — pick it explicitly)
+# (the backup-* glob is NOT sorted newest-first — pick it explicitly.
+#  Sort by NAME (-r) like the rotation code does: names are zero-padded
+#  timestamps, so name order == chronological order, unlike mtime.)
 mkdir -p backups
-newest=$(ls -1dt /media/vikram-athare/Storage/backup-restore-ubuntu/backup-* | head -1)
+newest=$(ls -1dr /media/vikram-athare/Storage/backup-restore-ubuntu/backup-* | head -1)
 cp -a "$newest/." backups/
 
 # or pick a specific snapshot explicitly:
-#   ls -1t /media/vikram-athare/Storage/backup-restore-ubuntu/
+#   ls -1r /media/vikram-athare/Storage/backup-restore-ubuntu/
 #   cp -a "/media/vikram-athare/Storage/backup-restore-ubuntu/backup-YYYYMMDD-HHMMSS.../." backups/
 ```
 
