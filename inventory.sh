@@ -253,13 +253,21 @@ cmd_add_app() {
   template="$(catalog_lookup "$name")"
   if [ -n "$template" ]; then
     while IFS='=' read -r k v; do
-      [ -n "$k" ] && printf -v "$k" '%s' "$v"
+      [ -n "$k" ] || continue
+      # Repeated keys (e.g. a second config_paths= line) accumulate newline-
+      # joined, which is exactly the newline-delimited contract write_app
+      # consumes — lets a catalog entry express multiple config paths.
+      if [ -n "${!k:-}" ]; then
+        printf -v "$k" '%s\n%s' "${!k}" "$v"
+      else
+        printf -v "$k" '%s' "$v"
+      fi
     done <<<"$template"
     echo "Found '$name' in the built-in catalog:"
     [ -n "${description:-}" ] && echo "  ${description}"
     echo "  install_type:   ${install_type:-?}"
     [ -n "${install_command:-}" ] && echo "  install_command: ${install_command}"
-    [ -n "${config_paths:-}" ] && echo "  config_paths:    ${config_paths}"
+    [ -n "${config_paths:-}" ] && echo "  config_paths:    ${config_paths//$'\n'/ }"
     if confirm "Use these defaults?" "y"; then
       write_app "$name" "${description:-}" "$install_type" "${install_command:-}" \
         "${check_cmd:-}" "${depends_apt:-}" "${config_paths:-}" "${package:-}" "${exclude:-}"
@@ -469,11 +477,19 @@ cmd_remove_user_dir() {
 scan_candidates() {
   local noise="dconf gtk-3.0 gtk-4.0 pulse ibus gnome-session user-dirs.dirs enchant glib-2.0 xdg goa-1.0 evolution tracker3 nautilus gedit mimeapps.list autostart"
   local d base
+  # Basenames of every declared app's config_paths, so already-declared apps
+  # whose config dir name differs from the app name (Code vs code, manicode vs
+  # freebuff, "MongoDB Compass" vs mongodb-compass) are not reported as gaps.
+  local declared_configs
+  # '[]?' yields nothing for apps with no config_paths — no '// empty' fallback
+  # (the installed yq v4.53.3 rejects the 'empty' keyword).
+  declared_configs="$(yq -r '.apps[].config_paths[]?' "$INVENTORY_FILE" | sed -n 's#.*/##p')"
   for d in "$HOME"/.config/*/; do
     [ -d "$d" ] || continue
     base="$(basename "$d")"
-    echo "$noise" | grep -Fw "$base" && continue
+    echo "$noise" | grep -Fwq "$base" && continue
     yaml_list '.apps[] | .name' | grep -Fqx "$base" && continue
+    printf '%s\n' "$declared_configs" | grep -Fqx "$base" && continue
     printf '%s\n' "$base"
   done
 }

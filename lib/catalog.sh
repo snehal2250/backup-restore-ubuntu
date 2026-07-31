@@ -56,6 +56,15 @@ depends_apt=wget
 config_paths=~/.config/gh
 EOF
       ;;
+    git)
+      cat <<'EOF'
+description=Git version control (official apt)
+install_type=apt
+check_cmd=git
+config_paths=~/.gitconfig
+config_paths=~/.config/git
+EOF
+      ;;
     gcloud)
       cat <<'EOF'
 description=Google Cloud CLI (classic snap)

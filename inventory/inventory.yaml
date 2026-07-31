@@ -67,6 +67,13 @@ apps:
       - "Cache"
       - "WebStorage"
       - "logs"
+  - name: "git"
+    description: "Git version control (official apt)"
+    install_type: "apt"
+    check_cmd: "git"
+    config_paths:
+      - "~/.gitconfig"
+      - "~/.config/git"
   - name: "gh"
     description: "GitHub CLI (official apt repo)"
     install_type: "custom"
