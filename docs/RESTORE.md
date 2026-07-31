@@ -231,7 +231,113 @@ mistakes — the inventory comments note each one.
 
 ---
 
-## 6. Troubleshooting
+## 6. Rehearse on a disposable VM (do this once, before you ever need a real restore)
+
+A rehearsal runs the full restore path (sections 2–5 above) on a **throwaway VM** so you
+can prove the mechanics work on a genuinely fresh system — without risking your real
+machine. You cannot test restore on your working machine: everything is already
+installed, so `restore.sh` would just skip each app. The rehearsal is the only way to
+exercise the real path (fresh install → config overwrite → services up).
+
+Cost: ~1–2 hours + a few GB of disk. Plan for it once.
+
+### 6.1 Make a fresh backup on your working machine first
+
+```bash
+./backup.sh
+tail -5 backups/backup-info.txt        # must show a 'status: ok' line
+```
+Use this newest snapshot as the rehearsal's config source.
+
+### 6.2 Create the disposable VM
+
+- Any local hypervisor: GNOME Boxes, VirtualBox, or virt-manager/KVM. Free.
+- Install a **stock Ubuntu, same major release** as your working machine, complete the
+  first-boot setup. The first user must have sudo (the default user does).
+
+### 6.3 Get the repo + config onto the VM
+
+The Storage disk holds only `backup-*` snapshots (the mirror of `backups/`), **not** the
+repo — bring the repo via git clone or a copy of the folder (same as section 2.2), then
+restore the config from the newest snapshot (same as section 2.3):
+
+```bash
+mkdir -p backups
+newest=$(ls -1dr /media/vikram-athare/Storage/backup-restore-ubuntu/backup-* | head -1)
+cp -a "$newest/." backups/
+```
+
+### 6.4 Preview
+
+```bash
+./restore.sh --dry-run
+```
+
+Read every app: expect `already installed (found '...')` only for things a stock Ubuntu
+ships; everything else should print the exact `apt`/`snap`/`npm`/installer command that
+will run. Also confirm Phase 4 lists your custom services and their unit files exist in
+`backups/services/<unit>/unit`.
+
+### 6.5 Run the restore for real
+
+```bash
+./restore.sh --yes
+# optionally, to also test a full base OS upgrade:
+./restore.sh --yes --upgrade-base
+```
+
+`yq` auto-installs on the fresh system, so no manual step is needed.
+
+### 6.6 Reboot and verify
+
+```bash
+sudo reboot
+# then, after logging back in:
+code --version && gh --version && opencode --version
+fish --version && terraform version && az version
+systemctl status cloudflared.service        # your custom services
+ls ~/.config/opencode                       # app config came back
+ls ~/Documents                              # user dir came back
+ls ~/.config/manicode/projects              # Freebuff per-project chat history came back
+```
+
+Also re-do the **section 5** manual steps here and confirm they work: Slack/OnlyOffice re-login,
+`ollama pull <model>`, and `az extension add -n <name>` for any Azure CLI extensions — the
+rehearsal is the right time to discover those need a working network/account, not later.
+
+### 6.7 Idempotency check (the important one)
+
+Run the restore a second time:
+
+```bash
+./restore.sh --yes
+```
+
+Everything should report `already installed` or skip; nothing should break, duplicate,
+or error. This proves re-runs are safe (principle 6).
+
+### 6.8 What to do with failures
+
+- A **custom/script installer** that fails prints a warning and restore **continues** —
+  note which app, fix its `install_command` in the inventory, re-run.
+- A **hard failure** (apt/snap install error) aborts — fix the cause, re-run (idempotent).
+- **Missing config?** Check the app declares `config_paths` in the inventory and that
+  `backup.sh` captured it (the app appears under `backups/apps/<name>/`).
+
+### 6.9 Done — delete the VM
+
+The VM is disposable: shut it down and delete it. The point was to prove the mechanics
+work. Keep this checklist in mind for the real restore — the real one just uses a newer
+snapshot.
+
+> **Why bother:** the restore path has never run on a fresh system — installers,
+> idempotency, and config round-trips (including nested `user_dirs` like
+> `~/.config/manicode/projects`) are only proven by a rehearsal. Fix any gaps in this
+> repo while you are calm, not during a real emergency.
+
+---
+
+## 7. Troubleshooting
 
 | Symptom | Cause / fix |
 | --- | --- |
@@ -244,7 +350,7 @@ mistakes — the inventory comments note each one.
 
 ---
 
-## 7. Safety notes
+## 8. Safety notes
 
 - `restore.sh` is **effectful** — it modifies the system. `--dry-run` previews it;
   `--yes` skips the confirmation. Default restore touches **only** declared items.
