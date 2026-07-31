@@ -58,7 +58,8 @@ Land changes in small, reviewable commits. This re-architecture lands as two com
    `.gitignore`) with `inventory/inventory.yaml` containing only commented examples.
 2. **Commit 2 — real inventory.** Landed once the user has declared their real
    apps/packages/services via `./inventory.sh wizard` / `add-app` / `add-package` /
-   `add-service`. Contains the populated `inventory/inventory.yaml` only.
+   `add-service`. Contains the populated `inventory/inventory.yaml` plus the
+   `package:` schema support (and related fixes) the real inventory required.
 
 Never commit `backups/` or the legacy `backup/` folder (both git-ignored). To carry
 `backups/` off-machine, copy it to a USB stick / another machine rather than committing it.

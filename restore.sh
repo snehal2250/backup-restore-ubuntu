@@ -137,11 +137,13 @@ restore_app_config() {
 }
 
 install_app() {
-  local name="$1" itype icmd check
+  local name="$1" itype icmd check pkg
   itype="$(app_get "$name" '.install_type')"
   [ -n "$itype" ] || { warn "  app '$name' has no install_type — skipping."; return 0; }
   icmd="$(app_get "$name" '.install_command')"
   check="$(app_get "$name" '.check_cmd')"
+  pkg="$(app_get "$name" '.package')"
+  [ -n "$pkg" ] || pkg="$name"
 
   # Dependencies are auto-installed with the app; they are never separate
   # inventory items (AGENTS.md principle 4).
@@ -158,10 +160,10 @@ install_app() {
     ok "  $name: already installed (found '$check')"
   else
     case "$itype" in
-      apt)          run sudo apt-get install -y "$name" ;;
-      snap)         run sudo snap install "$name" ;;
-      snap-classic) run sudo snap install --classic "$name" ;;
-      flatpak)      run flatpak install -y flathub "$name" ;;
+      apt)          run sudo apt-get install -y "$pkg" ;;
+      snap)         run sudo snap install "$pkg" ;;
+      snap-classic) run sudo snap install --classic "$pkg" ;;
+      flatpak)      run flatpak install -y flathub "$pkg" ;;
       npm-global)   run sudo npm install -g "$name"@latest ;;
       pipx)         run pipx install "$name" ;;
       cargo)        run cargo install "$name" ;;

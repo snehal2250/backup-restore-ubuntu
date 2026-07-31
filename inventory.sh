@@ -160,7 +160,7 @@ cmd_remove_package() {
 # add-app (wizard) / remove-app
 # ---------------------------------------------------------------------------
 write_app() {
-  local name="$1" desc="$2" itype="$3" icmd="$4" check="$5" deps="$6" paths="$7"
+  local name="$1" desc="$2" itype="$3" icmd="$4" check="$5" deps="$6" paths="$7" pkg="${8:-}"
   local tmp="/tmp/inv-app-${name}.yaml" d
   {
     printf -- '- name: "%s"\n' "$(esc "$name")"
@@ -168,6 +168,7 @@ write_app() {
     printf '  install_type: "%s"\n' "$(esc "$itype")"
     [ -n "$icmd" ] && printf '  install_command: "%s"\n' "$(esc "$icmd")"
     [ -n "$check" ] && printf '  check_cmd: "%s"\n' "$(esc "$check")"
+    [ -n "$pkg" ] && printf '  package: "%s"\n' "$(esc "$pkg")"
     if [ -n "$deps" ]; then
       echo "  depends_apt:"
       for d in $deps; do printf '    - "%s"\n' "$(esc "$d")"; done
@@ -199,7 +200,7 @@ write_service() {
 }
 
 cmd_add_app() {
-  local name="${1:-}" desc="" itype="" icmd="" check="" deps="" paths=""
+  local name="${1:-}" desc="" itype="" icmd="" check="" deps="" paths="" pkg=""
   if [ -z "$name" ]; then
     printf 'App name (e.g. opencode): '
     read -r name
@@ -223,13 +224,13 @@ cmd_add_app() {
     [ -n "${config_paths:-}" ] && echo "  config_paths:    ${config_paths}"
     if confirm "Use these defaults?" "y"; then
       write_app "$name" "${description:-}" "$install_type" "${install_command:-}" \
-        "${check_cmd:-}" "${depends_apt:-}" "${config_paths:-}"
+        "${check_cmd:-}" "${depends_apt:-}" "${config_paths:-}" "${package:-}"
       ok "Added app '$name'."
       return 0
     fi
     # User declined the catalog defaults -> run the full manual wizard instead.
     desc=""; itype=""; icmd=""; check=""; deps=""; paths=""
-    unset description install_type install_command check_cmd depends_apt config_paths
+    unset description install_type install_command check_cmd depends_apt config_paths package
     echo
     echo "Running the manual wizard instead."
   fi
@@ -254,6 +255,14 @@ cmd_add_app() {
       [ -n "$icmd" ] || die "An install command is required for $itype."
     fi
   fi
+  case "$itype" in
+    apt|snap|snap-classic|flatpak)
+      if [ -z "$pkg" ]; then
+        printf 'Package name if it differs from the app name (blank = "%s"): ' "$name"
+        read -r pkg
+      fi
+      ;;
+  esac
   if [ -z "$check" ]; then
     printf 'Binary to check for "already installed" (optional): '
     read -r check
@@ -287,7 +296,7 @@ cmd_add_app() {
     fi
   fi
 
-  write_app "$name" "$desc" "$itype" "$icmd" "$check" "$deps" "$paths"
+  write_app "$name" "$desc" "$itype" "$icmd" "$check" "$deps" "$paths" "$pkg"
   ok "Added app '$name'."
 }
 

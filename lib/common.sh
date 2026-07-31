@@ -98,9 +98,13 @@ yaml_get() {
 }
 
 # yaml_list QUERY -> prints each element of a list, one per line
+# NOTE: no trailing '| .[]' — yq iterates a non-empty scalar's CHARACTERS with .[]
+# (jq semantics), which would mangle every app/package name.
+# NOTE: no '// []' fallback either — on an empty/null list yq v4 prints a literal
+# '[]' line, which callers would treat as a real list item.
 yaml_list() {
   require_yq
-  yq -r "$1 // [] | .[]" "$INVENTORY_FILE"
+  yq -r "$1" "$INVENTORY_FILE"
 }
 
 # app_get NAME QUERY -> scalar attribute of one app (empty if absent)
@@ -139,16 +143,18 @@ is_flatpak_installed() {
 
 # is_app_installed NAME -> true if the app appears to be installed
 is_app_installed() {
-  local name="$1" itype check
+  local name="$1" itype check pkg
   itype="$(app_get "$name" '.install_type')"
   check="$(app_get "$name" '.check_cmd')"
+  pkg="$(app_get "$name" '.package')"
+  [ -n "$pkg" ] || pkg="$name"
   if [ -n "$check" ]; then
     command -v "$check" >/dev/null 2>&1 && return 0 || return 1
   fi
   case "$itype" in
-    apt)          is_apt_installed "$name" ;;
-    snap|snap-classic) is_snap_installed "$name" ;;
-    flatpak)      is_flatpak_installed "$name" ;;
+    apt)          is_apt_installed "$pkg" ;;
+    snap|snap-classic) is_snap_installed "$pkg" ;;
+    flatpak)      is_flatpak_installed "$pkg" ;;
     npm-global)   command -v "$name" >/dev/null 2>&1 ;;
     *)            return 1 ;;
   esac

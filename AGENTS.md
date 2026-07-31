@@ -111,6 +111,12 @@ apps:                    # one entry per MAIN app. Dependencies are per-app, nev
       - curl
     config_paths:                   # optional: backed up + restored (overwritten) for this app
       - ~/.config/opencode
+  - name: go                        # package: only for apt/snap/snap-classic/flatpak, when
+    install_type: apt               # the package name differs from the app name (here:
+    package: golang-go              # golang-go). The wizard prompts for it after you pick
+    check_cmd: go                   # the install method.
+    config_paths:
+      - ~/.config/go
 
 services:                # only CUSTOM services the user installed. Nothing default.
   - unit: myservice.service
@@ -128,6 +134,9 @@ Rules for agents editing the inventory:
 - `install_type` values: `apt`, `snap`, `snap-classic`, `flatpak`, `npm-global`, `pipx`,
   `cargo`, `script` (official installer), `custom` (arbitrary command). For `script`/
   `custom`, `install_command` is required.
+- Optional `package` overrides the package name for `apt`/`snap`/`snap-classic`/`flatpak`
+  installs when it differs from the app name (e.g. app `go` installs apt package
+  `golang-go`). The wizard prompts for it after the install method is chosen.
 - `config_paths` use `~` (tilde) form, not absolute `/home/...` paths, for portability.
 - A custom service's runtime files (env file, config dir, helper script) belong in that
   service's `config_paths` (or the relevant app's `config_paths`). They are never

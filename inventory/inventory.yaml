@@ -12,38 +12,83 @@
 #   * snap_packages supports the suffix ':classic' (e.g. code:classic)
 #   * apps:      install_type in apt|snap|snap-classic|flatpak|npm-global|pipx|cargo|script|custom
 #                script/custom requires install_command
+#                package: optional apt/snap/flatpak package name if it differs from the app name
 #                config_paths use '~' form and are the ONLY things backed up
 #   * services:  only CUSTOM services the user installed; target system|user
 # =============================================================================
 
 apt_packages:
-  # - git
-  # - curl
-
+# - git
+# - curl
 snap_packages:
-  # - code:classic
-
+# - code:classic
 flatpak_apps:
-  # - org.gimp.GIMP
-
+# - org.gimp.GIMP
 dotfiles:
-  # - .bashrc
-  # - .gitconfig
-  # - .profile
-
+# - .bashrc
+# - .gitconfig
+# - .profile
 apps:
-  # - name: opencode
-  #   description: AI coding agent
-  #   install_type: script
-  #   install_command: curl -fsSL https://opencode.ai/install | bash
-  #   check_cmd: opencode
-  #   depends_apt:
-  #     - curl
-  #   config_paths:
-  #     - ~/.config/opencode
-
+  - name: "opencode"
+    description: "AI coding agent (opencode.ai)"
+    install_type: "script"
+    install_command: "curl -fsSL https://opencode.ai/install | bash"
+    check_cmd: "opencode"
+    depends_apt:
+      - "curl"
+    config_paths:
+      - "~/.config/opencode"
+  - name: "code"
+    description: "Visual Studio Code"
+    install_type: "snap-classic"
+    check_cmd: "code"
+    config_paths:
+      - "~/.config/Code"
+  - name: "gh"
+    install_type: "snap"
+    check_cmd: "gh"
+    config_paths:
+      - "~/.config/gh"
+  - name: "gcloud"
+    install_type: "snap"
+    check_cmd: "gcloud"
+    config_paths:
+      - "~/.config/gcloud"
+    package: google-cloud-cli
+  - name: "go"
+    install_type: "apt"
+    check_cmd: "go"
+    config_paths:
+      - "~/.config/go"
+    package: golang-go
+  - name: "uv"
+    install_type: "pipx"
+    check_cmd: "uv"
+    config_paths:
+      - "~/.config/uv"
+  - name: "mongodb-compass"
+    install_type: "snap"
+    check_cmd: "mongodb-compass"
+    config_paths:
+      - ~/.config/MongoDB Compass
+# - name: opencode
+#   description: AI coding agent
+#   install_type: script
+#   install_command: curl -fsSL https://opencode.ai/install | bash
+#   check_cmd: opencode
+#   depends_apt:
+#     - curl
+#   config_paths:
+#     - ~/.config/opencode
+#
+# - name: go
+#   install_type: apt
+#   package: golang-go            # apt package name differs from the app name
+#   check_cmd: go
+#   config_paths:
+#     - ~/.config/go
 services:
-  # - unit: myservice.service
-  #   target: system
-  #   enable: true
-  #   start: true
+# - unit: myservice.service
+#   target: system
+#   enable: true
+#   start: true
