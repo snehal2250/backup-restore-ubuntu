@@ -4,7 +4,8 @@
 #
 # catalog_lookup NAME prints a KEY=VALUE template (or nothing if the app is
 # unknown). Keys match the fields of an `apps:` entry in inventory.yaml:
-#   description, install_type, install_command, check_cmd, depends_apt, config_paths
+#   description, install_type, install_command, check_cmd, depends_apt, config_paths,
+#   exclude (space-delimited rsync patterns to keep caches/binaries out of backups)
 #
 # The catalog is only a SUGGESTION source for the manual inventory tool. It is
 # never consulted by backup.sh / restore.sh — those read ONLY inventory.yaml.
@@ -30,6 +31,7 @@ description=Visual Studio Code
 install_type=snap-classic
 check_cmd=code
 config_paths=~/.config/Code
+exclude=CachedExtensionVSIXs CachedData Cache WebStorage logs
 EOF
       ;;
     docker)
@@ -152,6 +154,7 @@ install_command=wget -q -O /tmp/google-chrome.deb https://dl.google.com/linux/di
 check_cmd=google-chrome
 depends_apt=wget
 config_paths=~/.config/google-chrome
+exclude=optimization_guide_model_store component_crx_cache WasmTtsEngine Safe*Browsing OnDeviceHeadSuggestModel GPUPersistentCache Crashpad GPUCache
 EOF
       ;;
     fish)
@@ -195,6 +198,7 @@ install_type=npm-global
 check_cmd=freebuff
 depends_apt=nodejs npm
 config_paths=~/.config/manicode
+exclude=projects freebuff rg tree-sitter.wasm
 EOF
       ;;
     cloudflared)

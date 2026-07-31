@@ -16,6 +16,8 @@
 #                script/custom requires install_command
 #                package: optional apt/snap/flatpak package name if it differs from the app name
 #                config_paths use '~' form and are the ONLY things backed up
+#                exclude: optional rsync exclude patterns (one per line) to keep caches,
+#                model stores and re-downloadable binaries OUT of the backup
 #   * services:  only CUSTOM services the user installed; target system|user
 # =============================================================================
 
@@ -50,6 +52,14 @@ apps:
     check_cmd: "code"
     config_paths:
       - "~/.config/Code"
+    # Only real config (User/, Local Storage, ...) is captured; caches like
+    # CachedExtensionVSIXs / CachedData / Cache / WebStorage / logs regenerate.
+    exclude:
+      - "CachedExtensionVSIXs"
+      - "CachedData"
+      - "Cache"
+      - "WebStorage"
+      - "logs"
   - name: "gh"
     description: "GitHub CLI (official apt repo)"
     install_type: "custom"
@@ -108,6 +118,17 @@ apps:
       - "wget"
     config_paths:
       - "~/.config/google-chrome"
+    # Profile (Default/, Local State, Preferences...) is captured; model stores,
+    # component caches and Safe Browsing data regenerate on launch.
+    exclude:
+      - "optimization_guide_model_store"
+      - "component_crx_cache"
+      - "WasmTtsEngine"
+      - "Safe*Browsing"
+      - "OnDeviceHeadSuggestModel"
+      - "GPUPersistentCache"
+      - "Crashpad"
+      - "GPUCache"
   - name: "fish"
     description: "Friendly interactive shell (official apt)"
     install_type: "apt"
@@ -137,10 +158,12 @@ apps:
       - "~/.config/sublime-text"
   - name: "freebuff"
     description: "Freebuff AI coding assistant CLI (npm)"
-    # NOTE: full config dir per user choice — ~/.config/manicode holds login
-    # credentials (credentials.json), chat history, settings, AND a ~124MB
-    # bundled runtime binary. backups/ is git-ignored; do not "clean up" this
-    # path without asking the user.
+    # NOTE: ~/.config/manicode holds login credentials (credentials.json),
+    # settings, chat history AND a ~124MB bundled runtime binary. Only the
+    # small config files are captured: projects/ (per-project AI chat memory),
+    # the runtime binary (freebuff/), ripgrep (rg/) and tree-sitter.wasm are
+    # EXCLUDED by policy — the binary/ripgrep re-install with npm; the per-project
+    # chats are treated as regenerable data (not config).
     install_type: "npm-global"
     check_cmd: "freebuff"
     depends_apt:
@@ -148,6 +171,11 @@ apps:
       - "npm"
     config_paths:
       - "~/.config/manicode"
+    exclude:
+      - "projects"
+      - "freebuff"
+      - "rg"
+      - "tree-sitter.wasm"
   - name: "docker"
     description: "Docker Engine + CLI (official Docker apt repo)"
     install_type: "custom"

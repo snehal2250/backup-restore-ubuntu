@@ -95,6 +95,19 @@ Only configuration is copied.
 they are installed automatically with the app. You never see them as separate inventory
 items — you only think about the main apps you use.
 
+**Why is my backup so large?** Some apps keep caches, model stores, or bundled binaries
+inside their config folder (e.g. VS Code's `CachedExtensionVSIXs`/`CachedData`,
+Chrome's `optimization_guide_model_store`, Freebuff's bundled `freebuff/` binary). These
+are re-downloadable, so by default they are **excluded** from the backup via each app's
+`exclude:` list in the inventory — only real configuration is captured. Excluded items
+are not restored either; they regenerate on first launch.
+
+**Does backup keep old copies of removed/excluded config?** No. `backup.sh` wipes each
+app's captured folder before re-capturing, so `backups/` reflects the **current** state
+only (a config file that no longer exists on disk is dropped from the live `backups/`).
+History lives in the timestamped mirror snapshots in `BACKUP_DEST`, which are immutable
+once created.
+
 **How do I back up my Documents (or any folder)?** Declare it as a `user_dirs` entry
 (`./inventory.sh add-user-dir ~/Documents`). Unlike app config, these are whole
 user-data folders — `backup.sh` captures them in full under `backups/user-dirs/` and

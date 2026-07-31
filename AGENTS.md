@@ -127,6 +127,10 @@ apps:                    # one entry per MAIN app. Dependencies are per-app, nev
       - curl
     config_paths:                   # optional: backed up + restored (overwritten) for this app
       - ~/.config/opencode
+    exclude:                        # optional: rsync patterns to keep caches / model stores /
+      - CachedData                  # re-downloadable binaries OUT of backups/ (config-only
+      - Cache                       # principle). Applied to every config_path of this app;
+                                    # plain names match at any depth.
   - name: gcloud                    # package: only for apt/snap/snap-classic/flatpak, when
     install_type: snap-classic      # the package name differs from the app name (here the
     package: google-cloud-cli       # snap is google-cloud-cli; also e.g. onlyoffice ->
@@ -156,6 +160,12 @@ Rules for agents editing the inventory:
   wizard prompts for it after the install method is chosen.
 - `config_paths` and `user_dirs` use `~` (tilde) form, not absolute `/home/...` paths,
   for portability.
+- Optional `exclude` (per app) lists rsync exclude patterns — use it to keep caches,
+  model stores, and re-downloadable binaries out of the backup (e.g. VS Code's
+  `CachedExtensionVSIXs`/`CachedData`, Chrome's `optimization_guide_model_store`,
+  Freebuff's bundled `freebuff/` binary). Excluded items are NOT captured, so they are
+  NOT restored — they must regenerate (or be re-downloaded) after restore. A pattern
+  that needs a space uses a glob (e.g. `Safe*Browsing`).
 - `user_dirs` entries are whole data folders (e.g. `~/Documents`); they are captured and
   restored wholesale under `backups/user-dirs/` — this is the deliberate data-backup
   exception to principle 2.

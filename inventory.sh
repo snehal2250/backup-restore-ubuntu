@@ -175,8 +175,8 @@ cmd_remove_package() {
 # add-app (wizard) / remove-app
 # ---------------------------------------------------------------------------
 write_app() {
-  local name="$1" desc="$2" itype="$3" icmd="$4" check="$5" deps="$6" paths="$7" pkg="${8:-}"
-  local tmp="/tmp/inv-app-${name}.yaml" d
+  local name="$1" desc="$2" itype="$3" icmd="$4" check="$5" deps="$6" paths="$7" pkg="${8:-}" excl="${9:-}"
+  local tmp="/tmp/inv-app-${name}.yaml" d e
   {
     printf -- '- name: "%s"\n' "$(esc "$name")"
     [ -n "$desc" ] && printf '  description: "%s"\n' "$(esc "$desc")"
@@ -196,6 +196,19 @@ write_app() {
         [ -n "$d" ] || continue
         printf '    - "%s"\n' "$(esc "$d")"
       done <<< "$paths"
+    fi
+    if [ -n "$excl" ]; then
+      echo "  exclude:"
+      # exclude is space-delimited (rsync patterns, single tokens — see
+      # catalog.sh); a pattern that itself needs a space should use a glob
+      # (e.g. Safe*Browsing) or be hand-edited in inventory.yaml.
+      # NOTE: split with read -ra, NOT 'for e in $excl' — an unquoted expansion
+      # would glob-expand patterns like Safe*Browsing against the CWD.
+      local -a e_arr=()
+      read -ra e_arr <<< "$excl"
+      for e in "${e_arr[@]}"; do
+        printf '    - "%s"\n' "$(esc "$e")"
+      done
     fi
   } > "$tmp"
   yq -i '.apps += load("'"$tmp"'")' "$INVENTORY_FILE"
@@ -225,7 +238,7 @@ write_service() {
 }
 
 cmd_add_app() {
-  local name="${1:-}" desc="" itype="" icmd="" check="" deps="" paths="" pkg=""
+  local name="${1:-}" desc="" itype="" icmd="" check="" deps="" paths="" pkg="" excl=""
   if [ -z "$name" ]; then
     printf 'App name (e.g. opencode): '
     read -r name
@@ -249,13 +262,13 @@ cmd_add_app() {
     [ -n "${config_paths:-}" ] && echo "  config_paths:    ${config_paths}"
     if confirm "Use these defaults?" "y"; then
       write_app "$name" "${description:-}" "$install_type" "${install_command:-}" \
-        "${check_cmd:-}" "${depends_apt:-}" "${config_paths:-}" "${package:-}"
+        "${check_cmd:-}" "${depends_apt:-}" "${config_paths:-}" "${package:-}" "${exclude:-}"
       ok "Added app '$name'."
       return 0
     fi
     # User declined the catalog defaults -> run the full manual wizard instead.
     desc=""; itype=""; icmd=""; check=""; deps=""; paths=""
-    unset description install_type install_command check_cmd depends_apt config_paths package
+    unset description install_type install_command check_cmd depends_apt config_paths package exclude
     echo
     echo "Running the manual wizard instead."
   fi
@@ -321,7 +334,7 @@ cmd_add_app() {
     fi
   fi
 
-  write_app "$name" "$desc" "$itype" "$icmd" "$check" "$deps" "$paths" "$pkg"
+  write_app "$name" "$desc" "$itype" "$icmd" "$check" "$deps" "$paths" "$pkg" "$excl"
   ok "Added app '$name'."
 }
 

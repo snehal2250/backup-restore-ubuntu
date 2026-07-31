@@ -216,6 +216,9 @@ sudo reboot
   (their login/state lives in snap revision dirs, which are not backed up).
 - **Ollama** — models are intentionally not backed up (many GB, reproducible): re-pull with
   `ollama pull <model>` after restore.
+- **Apps with `exclude:` lists** (VS Code, Google Chrome, Freebuff) — excluded caches,
+  model stores, and bundled binaries are not captured, so they are not restored either;
+  they regenerate (or re-download) on first launch. Only real configuration comes back.
 - Any app with no `config_paths` declared in the inventory is reinstalled fresh but starts
   with defaults — check `./inventory.sh list` for entries missing `config_paths`.
 

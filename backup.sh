@@ -35,8 +35,28 @@ ok "Backup info written to backups/backup-info.txt"
 while IFS= read -r name; do
   [ -n "$name" ] || continue
   dest="$BACKUPS_DIR/apps/$name"
+  # Fresh capture every run: wipe stale files from previous runs. rsync
+  # --exclude only SKIPS transferring files — it never deletes them from an
+  # existing destination, so without this, removed config_paths and newly
+  # excluded caches would linger in backups/ forever (the very bloat this
+  # feature exists to avoid). NOTE: backups/ now reflects the CURRENT state
+  # only — a config_path that is transiently missing at backup time loses its
+  # prior copy here; the mirror snapshots in BACKUP_DEST preserve history.
+  # shellcheck disable=SC2115  # dest is always set (BACKUPS_DIR/apps/<name>)
+  rm -rf "${dest:?}/home" "${dest:?}/root"
   mkdir -p "$dest/home" "$dest/root"
   info "Backing up config for app: $name"
+  # Per-app rsync excludes (the 'exclude' field in inventory.yaml) keep caches,
+  # model stores and re-downloadable binaries OUT of backups/ — the config-only
+  # principle. Exclude patterns are plain rsync patterns (match by basename at
+  # any depth); they apply to every config_path of this app.
+  excl=()
+  while IFS= read -r e; do
+    [ -n "$e" ] && excl+=(--exclude="$e")
+  done < <(yq -r ".apps[] | select(.name == \"$name\") | .exclude[]?" "$INVENTORY_FILE")
+  if [ "${#excl[@]}" -gt 0 ]; then
+    info "  (excluded from backup: ${excl[*]#--exclude=})"
+  fi
   while IFS= read -r p; do
     [ -n "$p" ] || continue
     src="$(expand_path "$p")"
@@ -46,9 +66,9 @@ while IFS= read -r name; do
     fi
     if [[ "$src" == "$HOME"* ]]; then
       rel="${src#"$HOME"/}"
-      ( cd "$HOME" && rsync -aR "./$rel" "$dest/home/" )
+      ( cd "$HOME" && rsync -aR "${excl[@]}" "./$rel" "$dest/home/" )
     else
-      ( cd / && rsync -aR "./${src#/}" "$dest/root/" )
+      ( cd / && rsync -aR "${excl[@]}" "./${src#/}" "$dest/root/" )
     fi
     ok "  $p -> backups/apps/$name/"
   done < <(yq -r ".apps[] | select(.name == \"$name\") | .config_paths[]?" "$INVENTORY_FILE")
@@ -61,6 +81,9 @@ while IFS=$'\t' read -r unit target; do
   # Remove a stale unit-file-from-old-layout at this path so mkdir can proceed.
   [ -f "$sdest" ] && rm -f "$sdest"
   mkdir -p "$sdest"
+  # Fresh capture: wipe stale config copies from previous runs (see app loop).
+  # shellcheck disable=SC2115  # sdest is always set (BACKUPS_DIR/services/<unit>)
+  rm -rf "${sdest:?}/home" "${sdest:?}/root"
   if [ "$target" = "user" ]; then
     src="$HOME/.config/systemd/user/$unit"
   else
