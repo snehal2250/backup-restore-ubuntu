@@ -34,6 +34,10 @@ dotfiles: []
 # - .profile
 user_dirs:
   - ~/Documents
+  # Freebuff's per-project AI chat history (unique, NON-regenerable data — 486
+  # JSON/JSONL conversation files across 9 projects). Declared as a user_dir so it
+  # is captured whole (like Documents) and restored on a fresh machine.
+  - ~/.config/manicode/projects
 # - ~/Pictures
 # - ~/Desktop
 apps:
@@ -175,10 +179,10 @@ apps:
     description: "Freebuff AI coding assistant CLI (npm)"
     # NOTE: ~/.config/manicode holds login credentials (credentials.json),
     # settings, chat history AND a ~124MB bundled runtime binary. Only the
-    # small config files are captured: projects/ (per-project AI chat memory),
-    # the runtime binary (freebuff/), ripgrep (rg/) and tree-sitter.wasm are
-    # EXCLUDED by policy — the binary/ripgrep re-install with npm; the per-project
-    # chats are treated as regenerable data (not config).
+    # small config files are captured here: projects/ (per-project AI chat
+    # memory) is declared as a USER DIR (see user_dirs below) so it is backed
+    # up whole and restorable; the runtime binary (freebuff/), ripgrep (rg/)
+    # and tree-sitter.wasm are EXCLUDED by policy — they re-install with npm.
     install_type: "npm-global"
     check_cmd: "freebuff"
     depends_apt:
