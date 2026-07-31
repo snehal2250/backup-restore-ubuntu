@@ -44,6 +44,7 @@ copying of the OS itself.
 #    full unfiltered copy, last 5 snapshots kept — override with env vars)
 
 # 3. On a fresh Ubuntu: restore (fresh install + your config)
+#    Full step-by-step runbook: docs/RESTORE.md
 ./restore.sh                        # prompts; --yes to skip, --dry-run to preview
 ./restore.sh --upgrade-base         # OPT-IN: also apt full-upgrade of the base OS
 

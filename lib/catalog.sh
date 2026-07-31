@@ -49,5 +49,38 @@ check_cmd=google-chrome
 config_paths=~/.config/google-chrome
 EOF
       ;;
+    fish)
+      cat <<'EOF'
+description=Friendly interactive shell (official apt)
+install_type=apt
+check_cmd=fish
+config_paths=~/.config/fish
+EOF
+      ;;
+    sqlitebrowser)
+      cat <<'EOF'
+description=DB Browser for SQLite (official apt)
+install_type=apt
+check_cmd=sqlitebrowser
+config_paths=~/.config/sqlitebrowser
+EOF
+      ;;
+    stacer)
+      cat <<'EOF'
+description=System optimizer & monitor (official apt)
+install_type=apt
+check_cmd=stacer
+config_paths=~/.config/stacer
+EOF
+      ;;
+    sublime-text)
+      cat <<'EOF'
+description=Sublime Text editor (official apt repo)
+install_type=custom
+install_command=wget -qO - https://download.sublimetext.com/sublimehq-pub.gpg | sudo tee /etc/apt/keyrings/sublimehq-pub.asc > /dev/null && echo -e 'Types: deb\nURIs: https://download.sublimetext.com/\nSuites: apt/stable/\nSigned-By: /etc/apt/keyrings/sublimehq-pub.asc' | sudo tee /etc/apt/sources.list.d/sublime-text.sources && sudo apt-get update && sudo apt-get install -y sublime-text
+check_cmd=sublime_text
+config_paths=~/.config/sublime-text
+EOF
+      ;;
   esac
 }

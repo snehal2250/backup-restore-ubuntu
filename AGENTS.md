@@ -73,6 +73,7 @@ your settings over it.
 AGENTS.md                 <- this file (agents MUST read it)
 README.md                 <- user-facing quick start
 docs/PLAN.md              <- roadmap to the end state
+docs/RESTORE.md           <- user-facing step-by-step restore runbook
 inventory/
   inventory.yaml          <- THE source of truth (user-maintained, git-tracked)
 lib/
