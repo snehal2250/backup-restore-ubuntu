@@ -62,8 +62,15 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ Root execution: `require_non_root` hard-fails (was silent misbehavior).
 - ✅ Source-specific install checks (`is_app_installed_by_source`).
 - ✅ Post-install phase: groups, default shell, app extensions/models.
-- ⬜ Validate the full flow in a disposable VM: fresh Ubuntu → `restore.sh` → verify.
-- ⬜ Test `--dry-run` output is accurate end-to-end.
+- 🚧 Validate the full flow in a disposable VM: fresh Ubuntu → `restore.sh` → verify.
+  Rehearsal (2026-08-01/02, VirtualBox) reached app 16/24 (docker) before an interrupted
+  apt transaction; dry-run verified accurate end-to-end. Remaining: complete a full clean
+  run, reboot + verify, idempotency pass (§ 6.7–6.8 of docs/REHEARSAL-VIRTUALBOX.md).
+  Rehearsal lessons baked into the docs: persistent guest DNS (static `/etc/resolv.conf`,
+  bypassing the NAT DNS proxy which breaks with host MagicDNS) + run restore from a TTY
+  with the screen lock disabled (a locked GUI mid-restore corrupts the package state).
+- ✅ Test `--dry-run` output is accurate end-to-end (verified by the rehearsal dry-run,
+  which matched the real install commands until the run was interrupted).
 - ⬜ Run `shellcheck` on all updated scripts.
 
 ## Commit strategy

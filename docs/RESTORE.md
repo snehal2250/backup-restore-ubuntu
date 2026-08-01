@@ -156,6 +156,20 @@ exist in `backups/services/<unit>/unit` (a missing unit file is warned as
 ./restore.sh --yes
 ```
 
+**Run it from a TTY, and tee the output to a log.** A long restore (10–30+ min) can be
+interrupted by a locked GUI screen, leaving apt/dpkg half-configured. On a desktop,
+switch to a TTY with `Ctrl+Alt+F3`, log in, and run:
+
+```bash
+cd ~/backup-restore-ubuntu
+./restore.sh --yes 2>&1 | tee ~/restore.log
+```
+
+> **Never power-cycle mid-restore.** A hard power-off during an apt transaction breaks
+> the package state (D-Bus/polkit/GDM fail on next boot). If a run fails, re-run it —
+> restore is idempotent and picks up where it left off. The tee'd log shows exactly where
+> it stopped.
+
 `--upgrade-base` is a **separate, deliberate exercise** (opt-in, slower, touches the whole
 OS). Run it only after the plain restore succeeds, you've rebooted and verified, and the
 network is stable:
@@ -377,8 +391,10 @@ will run. Also confirm Phase 4 lists your custom services and their unit files e
 
 Before running, confirm the VM's network + DNS are healthy (restore depends on `apt`,
 `snap`, and `curl`): `ping -c 1 8.8.8.8`, `getent hosts api.snapcraft.io`, and
-`getent hosts in.archive.ubuntu.com`. If DNS fails, restart `systemd-resolved` or set a
-temporary `nameserver` in `/etc/resolv.conf` (see docs/REHEARSAL-VIRTUALBOX.md § 6).
+`getent hosts in.archive.ubuntu.com`. If DNS fails, use the **persistent** fix
+(static `/etc/resolv.conf` pointing at `8.8.8.8`, disabling `systemd-resolved` if it
+crashes) — a transient `nameserver` gets overwritten on reconnect/reboot and fails the
+restore mid-run again (see docs/REHEARSAL-VIRTUALBOX.md § 6).
 
 ```bash
 ./restore.sh --yes
@@ -455,8 +471,9 @@ snapshot.
 | `No backups/ found — configuration cannot be restored` | You skipped step 2.3. Copy the newest snapshot into `backups/` and re-run. |
 | `no unit file in backups/ — skipping` | The service's unit file wasn't captured. Run `./backup.sh` on your working machine, re-copy `backups/`, re-run. |
 | `install command for '<app>' failed` | The official installer errored (network, missing dep). Fix the cause, re-run; restore continues with other items. |
-| `Temporary failure resolving ...` / DNS errors mid-restore | Network/DNS dropped. Restart `systemd-resolved` or set a temporary `nameserver` in `/etc/resolv.conf`, then re-run restore (idempotent). Don't power-cycle while apt is mid-transaction. |
-| VM boots but D-Bus/polkit/GDM fail (no login) | Observed during the VM rehearsal: interrupted package transaction (network drop mid-`--upgrade-base` + power-cycle). TTY recovery: `Ctrl+Alt+F3` → `sudo dpkg --configure -a` → `sudo apt-get install -f -y` (if this still fails on DNS/network, fix networking first, then re-run) → reboot. Never power-cycle mid-upgrade. |
+| `Temporary failure resolving ...` / DNS errors mid-restore | Network/DNS dropped. Make the DNS fix **persistent** — a transient `nameserver` gets overwritten on reconnect/reboot and the restore fails again mid-run: set `nameserver 8.8.8.8` in a static `/etc/resolv.conf` (or via the connection: `nmcli connection modify ... ipv4.dns "8.8.8.8 1.1.1.1" ipv4.ignore-auto-dns yes`); if `systemd-resolved` itself crashes, disable it and use the static file. Then re-run restore (idempotent). Don't power-cycle while apt is mid-transaction. |
+| **"Authentication error" at the login screen before typing anything** | Interrupted package transaction — a restore died mid-apt and PAM/GDM is half-configured. Recovery: `Ctrl+Alt+F3` TTY → `sudo dpkg --configure -a` → `sudo apt-get install -f -y` → reboot. Prevent it by running restore from a TTY with the screen lock disabled (§ 4). |
+| VM boots but D-Bus/polkit/GDM fail (no login) | Interrupted package transaction (network drop mid-restore + power-cycle). TTY recovery: `Ctrl+Alt+F3` → `sudo dpkg --configure -a` → `sudo apt-get install -f -y` (if this still fails on DNS/network, fix networking first, then re-run) → reboot. Never power-cycle mid-upgrade. |
 | App installed but config looks missing | Its `config_paths` weren't declared in the inventory (or weren't captured). Declare them with `./inventory.sh` + `./backup.sh`, then re-run restore. |
 | Not an Ubuntu system | restore warns and continues; this repo targets Ubuntu only. |
 

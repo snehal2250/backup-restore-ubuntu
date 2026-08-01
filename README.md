@@ -184,6 +184,23 @@ as env vars to override (e.g. `BACKUP_DEST=  ./backup.sh` disables the mirror).
 **Can I change versions?** The repo never pins versions. If you need an exact old version
 of something, this repo isn't the tool for it — that's a deliberate design choice.
 
+## What is NOT covered (restore these manually)
+
+Some things deliberately live **outside** the inventory, because they are your own
+projects with no "recommended source" to reinstall from — or because backing them up
+wholesale would violate the config-only principle. After a restore, do these by hand:
+
+| Project | Why it's not in the inventory | Manual restore steps |
+| --- | --- | --- |
+| `chatgpt-local-api` (`~/chatgpt-local-api`, uvicorn on `:8000`) | Your own code; 1.5 GB with `.venv` + `data/` — too large and too personal to capture as config | re-clone the repo, recreate the venv (`.venv`), copy `.env` secrets, re-copy the user unit file to `~/.config/systemd/user/chatgpt-local-api.service`, then `systemctl --user enable --now chatgpt-local-api.service` |
+| `my-trading-bot` (`~/my-trading-bot`, docker compose + `.env.compose`) | Your own code + secrets; not installable from any package source | re-clone the repo, recreate `.env.compose`, pull images (`docker compose pull`), then re-import the `trading-bot-*.service` + `trading-bot-*.timer` units (`systemctl --user enable --now trading-bot-telegram.timer` etc.) |
+| Tailscale node identity (`/var/lib/tailscale/tailscaled.state`) | Root-owned; `backup.sh` runs without sudo and cannot capture it | after restore, re-run `tailscale up` (the app itself is installed fresh from the official installer) |
+
+If you ever want a project captured automatically, the clean way is to declare its
+service units + env/compose files via `./inventory.sh add-service` (with `config_paths`)
+and re-clone the code yourself — or declare a whole folder as a `user_dirs` entry if size
+isn't a concern.
+
 ## For AI agents
 
 Read `AGENTS.md` first — it contains the mission, the non-negotiable principles, the

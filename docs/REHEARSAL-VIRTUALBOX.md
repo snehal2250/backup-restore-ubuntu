@@ -188,6 +188,11 @@ tail -5 backups/backup-info.txt     # must show a 'status: ok' line
 
 > `backups/` is git-ignored, so a fresh clone won't have it — copying the newest snapshot
 > in is required or restore installs everything but skips config restoration.
+>
+> ⚠️ **Take the rollback snapshot AFTER this step.** The tested workflow is: § 5 copy
+> (repo + config) → § 6 DNS fix + network gate → snapshot → restore. A snapshot taken
+> before the repo/config copy rolls back to a VM that still needs § 5 redone (the clone
+> made before § 5 in the first rehearsal lacked `~/backup-restore-ubuntu` entirely).
 
 ---
 
@@ -216,17 +221,55 @@ getent hosts api.snapcraft.io        # DNS resolves?
 getent hosts in.archive.ubuntu.com
 ```
 
-If DNS fails: `sudo systemctl restart systemd-resolved`, or temporarily
-`echo 'nameserver 8.8.8.8' | sudo tee /etc/resolv.conf`. Host-side fallback for flaky NAT
-DNS: power off the VM, `VBoxManage modifyvm "ubuntu-rehearsal" --natdnshostresolver1 on`,
-then power back on.
-
-Then the real thing — **choose ONE** (these are mutually exclusive; pasting both runs the
-full base-OS upgrade):
+If DNS fails, the reliable fix is to **bypass the VirtualBox NAT DNS proxy entirely and
+make it persistent** — the rehearsal proved the NAT DNS proxy breaks on hosts whose own
+DNS goes through Tailscale/MagicDNS or other non-standard resolvers, and a transient
+`resolvectl`/`resolv.conf` fix gets overwritten on reconnect or reboot, failing the
+restore mid-run:
 
 ```bash
-./restore.sh --yes
+# 1. Make the override permanent (survives reboots/reconnects):
+sudo nmcli connection modify "Wired connection 1" ipv4.dns "8.8.8.8 1.1.1.1" ipv4.ignore-auto-dns yes
+sudo nmcli connection up "Wired connection 1"
+
+# 2. If systemd-resolved is still flaky/crashes mid-restore, remove the stub entirely:
+sudo systemctl disable --now systemd-resolved
+sudo rm -f /etc/resolv.conf
+echo -e "nameserver 8.8.8.8\nnameserver 1.1.1.1" | sudo tee /etc/resolv.conf
+
+# 3. Verify with the REAL gate — apt must fully succeed:
+getent hosts archive.ubuntu.com
+sudo apt-get update        # must complete without "Temporary failure resolving"
 ```
+
+Host-side fallback for flaky NAT DNS: power off the VM,
+`VBoxManage modifyvm "ubuntu-rehearsal" --natdnshostresolver1 on`, then power back on.
+> ⚠️ Tested 2026-08-02: this did **not** fix DNS on a host whose resolver goes through
+> Tailscale MagicDNS — the guest-side persistent fix above is the reliable one; try this
+> only if the guest-side fix is somehow unavailable.
+
+**Before the real run — harden the session (a locked GUI screen mid-restore corrupts the
+package state; this was the #1 rehearsal failure):**
+
+```bash
+# 1. Snapshot the clean VM first — one-command rollback if anything goes wrong:
+VBoxManage snapshot "ubuntu-rehearsal" take "pre-restore-network-ok" \
+  --description "clean, network verified, before restore"
+
+# 2. Disable the screen lock so a 20–30 min restore can't be interrupted:
+gsettings set org.gnome.desktop.session idle-delay 0
+gsettings set org.gnome.desktop.screensaver lock-enabled false
+
+# 3. Run the restore from a TTY (Ctrl+Alt+F3) — the GUI session is out of the picture —
+#    and tee the full output to a log so failures are diagnosable:
+cd ~/backup-restore-ubuntu
+./restore.sh --yes 2>&1 | tee ~/restore.log
+```
+
+> **Never power-cycle mid-restore.** A hard power-off during an apt transaction leaves
+> dpkg half-configured (D-Bus/polkit/GDM fail on the next boot). If it breaks anyway:
+> restore the snapshot (`VBoxManage snapshot "ubuntu-rehearsal" restore
+> "pre-restore-network-ok"`), re-apply the DNS fix, re-run — the restore is idempotent.
 
 `--upgrade-base` is a **separate, second-pass exercise** — only after the plain restore
 succeeds, you've rebooted and verified, and networking is stable:
@@ -292,6 +335,8 @@ path, just on real hardware with a newer snapshot.
 | Guest Additions: `make: not found` / "system is not currently set up to build kernel modules" | Build toolchain missing — `sudo apt install -y build-essential perl linux-headers-$(uname -r)`, then re-run `/mnt/VBoxLinuxAdditions.run`. The later "cannot reload kernel modules: one or more module(s) is still in use" line is **normal** — reboot to load the new modules |
 | Shared folder appears but empty | Share was added while the VM ran; `VBoxManage sharedfolder remove` + re-`add` after a VM restart |
 | `yq is required...` on dry-run | The auto-install failed (no `snap` and no `curl` on the VM). Install it: `sudo snap install yq`, then re-run the dry-run |
-| Restore fails with `Temporary failure resolving ...` / DNS errors | Guest DNS is down (network dropped mid-run). See § 6 preflight: `sudo systemctl restart systemd-resolved`, or `echo 'nameserver 8.8.8.8' \| sudo tee /etc/resolv.conf`, then re-run restore (idempotent) |
-| VM boots but **D-Bus / polkit / GDM fail** (no login screen) | Almost always an interrupted package transaction: the network dropped mid-`apt`/`--upgrade-base` and the VM was power-cycled while package state was half-configured. Recovery: `Ctrl+Alt+F3` → log in on the TTY → `sudo dpkg --configure -a` → `sudo apt-get install -f -y` (if this still fails on DNS/network, fix networking first, then re-run) → `sudo reboot`. **Never power-cycle mid-upgrade** — wait for the prompt to return. A broken rehearsal VM does **not** mean the repo or snapshot is damaged |
+| Restore fails with `Temporary failure resolving ...` / DNS errors | Guest DNS is down. This recurs if the fix is transient — make it persistent (see § 6): `nmcli connection modify ... ipv4.dns "8.8.8.8 1.1.1.1" ipv4.ignore-auto-dns yes`; if systemd-resolved crashes mid-run, `sudo systemctl disable --now systemd-resolved` + static `/etc/resolv.conf`. Then re-run restore (idempotent) |
+| **"Authentication error" on the login screen before typing anything** | Interrupted package transaction — a restore died mid-apt and PAM/GDM is half-configured. Recovery: `Ctrl+Alt+F3` TTY → `sudo dpkg --configure -a` → `sudo apt-get install -f -y` → `sudo reboot`. Prevent it: disable the screen lock and run restore from a TTY (see § 6) |
+| **Bridged networking gives the VM no IP** | USB WiFi adapters often don't support VirtualBox bridged pass-through. Stay on NAT and fix DNS at the guest level (§ 6) instead |
+| VM boots but **D-Bus / polkit / GDM fail** (no login screen) | Same interrupted package transaction as the authentication-error row above — same TTY recovery (`Ctrl+Alt+F3` → `sudo dpkg --configure -a` → `sudo apt-get install -f -y` → `sudo reboot`; fix DNS/network first if those still fail). **Never power-cycle mid-upgrade** — wait for the prompt to return. A broken rehearsal VM does **not** mean the repo or snapshot is damaged |
 | VM boots to a black screen after install | The ISO wasn't ejected — re-attach `emptydrive` (step 3) and reboot |

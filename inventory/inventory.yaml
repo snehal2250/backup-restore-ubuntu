@@ -260,6 +260,13 @@ apps:
     description: "Azure Storage Explorer (snap)"
     install_type: "snap"
     check_cmd: "storage-explorer"
+  - name: "tailscale"
+    description: "Tailscale mesh VPN (official installer)"
+    install_type: "script"
+    install_command: "curl -fsSL https://tailscale.com/install.sh | sh"
+    check_cmd: "tailscale"
+    depends_apt:
+      - "curl"
 services:
   - unit: "cloudflared.service"
     target: system
@@ -268,3 +275,7 @@ services:
     config_paths:
       - "/etc/cloudflared/config.yml"
       - "~/.cloudflared"
+  - unit: "cloudflared-update.service"
+    target: system
+    enable: false
+    start: false
