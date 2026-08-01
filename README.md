@@ -27,7 +27,8 @@ copying of the OS itself.
 
 > **Prerequisite:** the scripts read the inventory with `yq`. `inventory.sh` and
 > `backup.sh` will offer to install it for you (`sudo snap install yq`); `restore.sh`
-> auto-installs it on a fresh system.
+> auto-installs it on a fresh system — including under `--dry-run` (a preview still needs
+> to parse the inventory; that's the one thing a dry-run actually executes).
 
 ```bash
 # 1. Declare what you use (your manual responsibility — this file is the source of truth)
@@ -48,9 +49,17 @@ copying of the OS itself.
 #    Full step-by-step runbook: docs/RESTORE.md
 #    VirtualBox rehearsal (test the restore path in a VM): docs/REHEARSAL-VIRTUALBOX.md
 ./restore.sh                        # prompts; --yes to skip, --dry-run to preview
-./restore.sh --upgrade-base         # OPT-IN: also apt full-upgrade of the base OS
+```
 
-# Keep everything current day-to-day
+Then, optionally, as a separate exercise (only after the plain restore + verification):
+
+```bash
+./restore.sh --upgrade-base         # OPT-IN: also apt full-upgrade of the base OS
+```
+
+Keep everything current day-to-day:
+
+```bash
 ./update_all_ubuntu.sh
 ```
 

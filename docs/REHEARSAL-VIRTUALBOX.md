@@ -207,11 +207,31 @@ everything else prints the exact `apt`/`snap`/installer command that will run. C
 > the inventory), so no manual step is needed. If the auto-install fails (no `snap`, no
 > `curl`), install it yourself: `sudo snap install yq` and re-run the dry-run.
 
-Then the real thing:
+**Before the real run — confirm network + DNS in the guest** (restore depends on `apt`,
+`snap`, and `curl` reaching their repos; a dead resolver fails every install):
+
+```bash
+ping -c 1 -W 2 8.8.8.8              # network reachable?
+getent hosts api.snapcraft.io        # DNS resolves?
+getent hosts in.archive.ubuntu.com
+```
+
+If DNS fails: `sudo systemctl restart systemd-resolved`, or temporarily
+`echo 'nameserver 8.8.8.8' | sudo tee /etc/resolv.conf`. Host-side fallback for flaky NAT
+DNS: power off the VM, `VBoxManage modifyvm "ubuntu-rehearsal" --natdnshostresolver1 on`,
+then power back on.
+
+Then the real thing — **choose ONE** (these are mutually exclusive; pasting both runs the
+full base-OS upgrade):
 
 ```bash
 ./restore.sh --yes
-# optional, to also test a full base-OS upgrade:
+```
+
+`--upgrade-base` is a **separate, second-pass exercise** — only after the plain restore
+succeeds, you've rebooted and verified, and networking is stable:
+
+```bash
 ./restore.sh --yes --upgrade-base
 ```
 
@@ -241,6 +261,11 @@ Also re-do the **section 5 manual steps** here: Slack/OnlyOffice re-login,
 
 Everything should report `already installed` or skip; nothing should error or duplicate.
 
+> **New shell before judging idempotency:** tools whose installer edits `~/.bashrc` to add
+> its own `PATH` (e.g. `opencode`) only show up on `command -v` in a **fresh shell**. If a
+> re-run reinstalls such a tool, open a new terminal (or `source ~/.bashrc`) first — the
+> re-run was only triggered because the old shell couldn't see the freshly added binary.
+
 ---
 
 ## 8. Clean up the VM when done
@@ -267,4 +292,6 @@ path, just on real hardware with a newer snapshot.
 | Guest Additions: `make: not found` / "system is not currently set up to build kernel modules" | Build toolchain missing — `sudo apt install -y build-essential perl linux-headers-$(uname -r)`, then re-run `/mnt/VBoxLinuxAdditions.run`. The later "cannot reload kernel modules: one or more module(s) is still in use" line is **normal** — reboot to load the new modules |
 | Shared folder appears but empty | Share was added while the VM ran; `VBoxManage sharedfolder remove` + re-`add` after a VM restart |
 | `yq is required...` on dry-run | The auto-install failed (no `snap` and no `curl` on the VM). Install it: `sudo snap install yq`, then re-run the dry-run |
+| Restore fails with `Temporary failure resolving ...` / DNS errors | Guest DNS is down (network dropped mid-run). See § 6 preflight: `sudo systemctl restart systemd-resolved`, or `echo 'nameserver 8.8.8.8' \| sudo tee /etc/resolv.conf`, then re-run restore (idempotent) |
+| VM boots but **D-Bus / polkit / GDM fail** (no login screen) | Almost always an interrupted package transaction: the network dropped mid-`apt`/`--upgrade-base` and the VM was power-cycled while package state was half-configured. Recovery: `Ctrl+Alt+F3` → log in on the TTY → `sudo dpkg --configure -a` → `sudo apt-get install -f -y` (if this still fails on DNS/network, fix networking first, then re-run) → `sudo reboot`. **Never power-cycle mid-upgrade** — wait for the prompt to return. A broken rehearsal VM does **not** mean the repo or snapshot is damaged |
 | VM boots to a black screen after install | The ISO wasn't ejected — re-attach `emptydrive` (step 3) and reboot |

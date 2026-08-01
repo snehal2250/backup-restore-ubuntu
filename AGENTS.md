@@ -57,6 +57,8 @@ your settings over it.
    Latest stable wins, always. No `@1.2.3` anywhere in the data.
 6. **Idempotent and safe.** Scripts must be safe to run multiple times. `restore.sh`
    prompts before modifying the system (`--yes` to skip) and supports `--dry-run`.
+   `--dry-run` previews the restore but may auto-install `yq` if missing — the only
+   thing a preview executes, because it must still read the inventory.
 7. **Everything is declarative.** Data lives in `inventory/inventory.yaml`; code lives in
    scripts under this repo. Never mix the two.
 
@@ -232,7 +234,9 @@ must never delete data on the target. Services get their `config_paths` restored
   duplicate these in new scripts.
 - **YAML is read with `yq`** (https://github.com/mikefarah/yq). `require_yq` follows
   `YQ_AUTO`: fail with install instructions (default), install silently (restore on a fresh
-  system), or ask the user first (inventory.sh/backup.sh). Write YAML with `yq -i` and
+  system), or ask the user first (inventory.sh/backup.sh). `restore.sh` passes mode 1
+  (silent install) even under `--dry-run`, and the install deliberately bypasses the
+  dry-run `run()` wrapper because the preview must still parse `inventory.yaml`. Write YAML with `yq -i` and
   `strenv(VAR)`/`load()`/`env()` — never by string-concatenating user input into
   expressions. Note: the installed yq v4.53.3 does **not** support `--arg`; use
   `strenv()` (or `env()`) with an inline `VAR=value` prefix instead.

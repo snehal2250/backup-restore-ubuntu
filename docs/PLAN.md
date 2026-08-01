@@ -47,7 +47,8 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   enable/start + service config restore, config overwrite from `backups/`, and wholesale
   restore of declared `user_dirs`. Base OS full-upgrade is OPT-IN via `--upgrade-base`
   (default touches only declared items). Flags: `--dry-run`, `--yes`. Auto-installs `yq`
-  on a fresh system; `inventory.sh`/`backup.sh` ask before installing it.
+  on a fresh system — including under `--dry-run` (a preview must still read the
+  inventory); `inventory.sh`/`backup.sh` ask before installing it.
 - `update_all_ubuntu.sh` — apt/snap/flatpak/npm + declared npm/pipx/cargo apps.
 - `schedule_cron.sh` + `.gitignore` updated for the new `backups/` layout.
 
@@ -67,7 +68,8 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   - ✅ Service restore ordering fixed: `restore_services()` now restores a service's
     `config_paths` **before** `enable`/`start`, so services boot with real config.
   - ✅ Root-side (`/` path) config capture made explicit in `backup.sh`: unreadable
-    root-owned paths warn instead of silently failing (run with sudo to capture them).
+    root-owned paths warn instead of silently failing (fix permissions or declare a
+    readable path — NOT "run with sudo", which would flip `$HOME` to `/root`).
   - ✅ `restore.sh` warns when a `script`/`custom` app has no `check_cmd` (re-runs would
     re-run the installer).
   - ✅ Restore semantics documented as **additive overlay** (never deletes target files),
@@ -93,7 +95,7 @@ Since then the branch has grown in small follow-up commits: the `BACKUP_DEST` mi
 feature, legacy-cleanup + cron dedup, more app declarations (cloudflared, google-chrome,
 fish, sqlitebrowser, stacer, sublime-text, freebuff), a shellcheck hardening pass, the
 `docs/RESTORE.md` runbook, and the inventory expansion to 23 apps (9 new apps + 4 install-
-method fixes, `98b7425`).
+method fixes, `98b7425`) — since grown to the current 24 apps + 1 service.
 
 Never commit `backups/` (git-ignored). `backup.sh` automatically mirrors it to the
 configured `BACKUP_DEST` (default `/media/vikram-athare/Storage/backup-restore-ubuntu`)

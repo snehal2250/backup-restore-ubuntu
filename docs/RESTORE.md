@@ -23,7 +23,7 @@ items for it, and the whole thing is **idempotent** — you can re-run it safely
 | 1/5 Base system | `apt-get update`; full-upgrade **only if** `--upgrade-base` (opt-in) | — |
 | 2/5 Packages | installs `apt_packages`, `snap_packages` (incl. `:classic`), `flatpak_apps` | the package lists |
 | 3/5 Apps | per app: installs `depends_apt`, then the app itself, then restores its config | `apps:` |
-| 4/5 Services | copies unit files, enables/starts them, restores their config | `services:` |
+| 4/5 Services | copies unit files, restores their config, then enables/starts them | `services:` |
 | 5/5 Dotfiles & user dirs | copies declared dotfiles to `$HOME`; restores whole `user_dirs` folders (e.g. `~/Documents`) | `dotfiles:` + `user_dirs:` |
 
 Flags:
@@ -150,9 +150,15 @@ exist in `backups/services/<unit>/unit` (a missing unit file is warned as
 
 ```bash
 ./restore.sh            # review the prompt, then answer y
-# or non-interactively:
+# or non-interactively (choose ONE — pasting both runs the full base-OS upgrade):
 ./restore.sh --yes
-# or if you also want the base OS fully upgraded (opt-in, slower, touches the whole OS):
+```
+
+`--upgrade-base` is a **separate, deliberate exercise** (opt-in, slower, touches the whole
+OS). Run it only after the plain restore succeeds, you've rebooted and verified, and the
+network is stable:
+
+```bash
 ./restore.sh --yes --upgrade-base
 ```
 
@@ -195,6 +201,11 @@ Two failure behaviors, by design:
 - Any other failure (e.g. an `apt`/`snap` install error) **aborts the run** (`set -e`).
   Fix the cause, then re-run `./restore.sh --yes` — restore is idempotent and picks up
   where it left off.
+
+> ⚠️ A green `[ OK ] <app>: config restored` line means the *captured config* was copied
+> back — it does **not** mean the app's install step succeeded (a failed `script`/`custom`
+> installer still restores config before restore continues). Watch the warning lines above
+> each app, not just the green ones.
 
 ---
 
@@ -362,13 +373,24 @@ will run. Also confirm Phase 4 lists your custom services and their unit files e
 
 ### 6.6 Run the restore for real
 
+Before running, confirm the VM's network + DNS are healthy (restore depends on `apt`,
+`snap`, and `curl`): `ping -c 1 8.8.8.8`, `getent hosts api.snapcraft.io`, and
+`getent hosts in.archive.ubuntu.com`. If DNS fails, restart `systemd-resolved` or set a
+temporary `nameserver` in `/etc/resolv.conf` (see docs/REHEARSAL-VIRTUALBOX.md § 6).
+
 ```bash
 ./restore.sh --yes
-# optionally, to also test a full base OS upgrade:
-./restore.sh --yes --upgrade-base
 ```
 
 `yq` auto-installs on the fresh system, so no manual step is needed.
+
+`--upgrade-base` (whole-OS apt upgrade) is a **separate, second-pass exercise** — run it
+only after the plain restore succeeds, you've rebooted and verified, and networking is
+stable:
+
+```bash
+./restore.sh --yes --upgrade-base
+```
 
 ### 6.7 Reboot and verify
 
@@ -397,6 +419,10 @@ Run the restore a second time:
 
 Everything should report `already installed` or skip; nothing should break, duplicate,
 or error. This proves re-runs are safe (principle 6).
+
+> Tools whose installer edits `~/.bashrc` to add its own `PATH` (e.g. `opencode`) only
+> show up on `command -v` in a **fresh shell** — open a new terminal (or
+> `source ~/.bashrc`) before judging a re-run, or it may re-run the installer.
 
 ### 6.9 What to do with failures
 
@@ -427,6 +453,8 @@ snapshot.
 | `No backups/ found — configuration cannot be restored` | You skipped step 2.3. Copy the newest snapshot into `backups/` and re-run. |
 | `no unit file in backups/ — skipping` | The service's unit file wasn't captured. Run `./backup.sh` on your working machine, re-copy `backups/`, re-run. |
 | `install command for '<app>' failed` | The official installer errored (network, missing dep). Fix the cause, re-run; restore continues with other items. |
+| `Temporary failure resolving ...` / DNS errors mid-restore | Network/DNS dropped. Restart `systemd-resolved` or set a temporary `nameserver` in `/etc/resolv.conf`, then re-run restore (idempotent). Don't power-cycle while apt is mid-transaction. |
+| VM boots but D-Bus/polkit/GDM fail (no login) | Observed during the VM rehearsal: interrupted package transaction (network drop mid-`--upgrade-base` + power-cycle). TTY recovery: `Ctrl+Alt+F3` → `sudo dpkg --configure -a` → `sudo apt-get install -f -y` (if this still fails on DNS/network, fix networking first, then re-run) → reboot. Never power-cycle mid-upgrade. |
 | App installed but config looks missing | Its `config_paths` weren't declared in the inventory (or weren't captured). Declare them with `./inventory.sh` + `./backup.sh`, then re-run restore. |
 | Not an Ubuntu system | restore warns and continues; this repo targets Ubuntu only. |
 
