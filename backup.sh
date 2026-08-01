@@ -22,14 +22,14 @@ require_yq "$YQ_AUTO"
 
 mkdir -p "$BACKUPS_DIR"/{apps,services,dotfiles,user-dirs}
 
-{
-  echo "host: $(hostname)"
-  echo "user: $USER"
-  echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  echo "repo: $REPO_ROOT"
-  git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null | sed 's/^/git_commit: /' || true
-} > "$BACKUPS_DIR/backup-info.txt"
-ok "Backup info written to backups/backup-info.txt"
+# Capture run metadata at start; written to backup-info.txt only on COMPLETION.
+# No file exists during a run — a missing or status-absent file means the last
+# run did not complete (or no run has ever succeeded).
+BACKUP_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+BACKUP_HOST="$(hostname)"
+BACKUP_USER="$USER"
+BACKUP_REPO="$REPO_ROOT"
+GIT_COMMIT="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || true)"
 
 # --- Apps: capture declared config paths ---------------------------------
 while IFS= read -r name; do
@@ -89,8 +89,6 @@ done < <(yaml_list '.apps[] | .name')
 while IFS=$'\t' read -r unit target; do
   [ -n "$unit" ] || continue
   sdest="$BACKUPS_DIR/services/$unit"
-  # Remove a stale unit-file-from-old-layout at this path so mkdir can proceed.
-  [ -f "$sdest" ] && rm -f "$sdest"
   mkdir -p "$sdest"
   # Fresh capture: wipe stale config copies from previous runs (see app loop).
   # shellcheck disable=SC2115  # sdest is always set (BACKUPS_DIR/services/<unit>)
@@ -212,19 +210,25 @@ mirror_backup() {
 mirror_backup
 
 # --- Success marker ----------------------------------------------------------
-# backup-info.txt is (re)written at the START of a run, so on its own it cannot
-# prove the run COMPLETED. This block is appended only when the whole run
-# finished (captures + mirror). Therefore:
-#   * 'status: ok' present  -> the last run completed successfully
-#   * 'status: ok' absent   -> the last run did NOT complete (aborted mid-way)
-# The newest mirror snapshot gets the same file so the off-machine copy can be
+# backup-info.txt is written ONLY on a COMPLETED run (meta­data + status in a
+# single atomic write). Therefore:
+#   * File present with 'status: ok'  -> the last run completed successfully
+#   * File absent or lacks that line  -> the last run did NOT complete (or no
+#     run has ever succeeded here; the most recent mirror snapshot still holds
+#     the previous successful run's marker)
+# The newest mirror snapshot gets a copy so the off-machine copy can be
 # verified identically (cp guarded so a failed mirror never clobbers an older
 # good snapshot's info).
 {
+  echo "host: $BACKUP_HOST"
+  echo "user: $BACKUP_USER"
+  echo "started: $BACKUP_STARTED"
+  echo "repo: $BACKUP_REPO"
+  [ -n "$GIT_COMMIT" ] && echo "git_commit: $GIT_COMMIT"
   echo "status: ok"
   echo "finished: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "mirror: ${MIRROR_STATUS:-unknown}"
-} >> "$BACKUPS_DIR/backup-info.txt"
+} > "$BACKUPS_DIR/backup-info.txt"
 if [ "${MIRROR_STATUS:-}" = "ok" ] && [ -n "${MIRROR_NEWEST:-}" ]; then
   cp "$BACKUPS_DIR/backup-info.txt" "$MIRROR_NEWEST/backup-info.txt"
 fi

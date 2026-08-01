@@ -11,6 +11,8 @@
 #   ./restore.sh --yes           # skip prompts
 #   ./restore.sh --dry-run       # preview; only yq auto-installs if missing
 #   ./restore.sh --upgrade-base  # ALSO apt full-upgrade the base OS (opt-in)
+#   ./restore.sh --configs-only  # restore config only (skip all installs)
+#   ./restore.sh --packages-only # install fresh only (skip config restore)
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -19,16 +21,23 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 DRY_RUN=0
 ASSUME_YES=0
 DO_UPGRADE=0   # base OS upgrade is opt-in: only declared items are touched by default
+CONFIGS_ONLY=0  # skip installs — only restore config from backups/
+PACKAGES_ONLY=0 # skip config restore — only install fresh
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run)      DRY_RUN=1 ;;
     --yes|-y)       ASSUME_YES=1 ;;
     --upgrade-base) DO_UPGRADE=1 ;;
-    *) die "Unknown option: $1 (usage: $0 [--dry-run] [--yes] [--upgrade-base])" ;;
+    --configs-only) CONFIGS_ONLY=1 ;;
+    --packages-only) PACKAGES_ONLY=1 ;;
+    *) die "Unknown option: $1 (usage: $0 [--dry-run] [--yes] [--upgrade-base] [--configs-only|--packages-only])" ;;
   esac
   shift
 done
+
+# --configs-only and --packages-only are mutually exclusive.
+[ "$CONFIGS_ONLY" = "1" ] && [ "$PACKAGES_ONLY" = "1" ] && die "--configs-only and --packages-only are mutually exclusive."
 
 [ -f "$INVENTORY_FILE" ] || die "Inventory file not found: $INVENTORY_FILE"
 # yq is required to READ the inventory, so auto-install it even under --dry-run
@@ -56,26 +65,39 @@ elif [ -d "$BACKUPS_DIR" ] && [ -n "$(find "$BACKUPS_DIR" -mindepth 1 -print -qu
   BACKUPS_PRESENT=1
 fi
 if [ "$BACKUPS_PRESENT" = "0" ]; then
-  warn "No backups/ found — packages will still be installed, but configuration cannot be restored."
+  if [ "$CONFIGS_ONLY" = "1" ]; then
+    warn "No backups/ found — --configs-only has nothing to restore."
+  else
+    warn "No backups/ found — packages will still be installed, but configuration cannot be restored."
+  fi
 fi
 
-if [ "$DRY_RUN" = "0" ] && [ "$ASSUME_YES" = "0" ]; then
+if [ "$DRY_RUN" = "0" ] && [ "$ASSUME_YES" = "0" ] && [ "$CONFIGS_ONLY" = "0" ]; then
   confirm "This will install packages and modify the system. Continue?" "n" || die "Aborted."
+elif [ "$CONFIGS_ONLY" = "1" ] && [ "$DRY_RUN" = "0" ] && [ "$ASSUME_YES" = "0" ]; then
+  confirm "This will restore configuration from backups/ (no packages will be installed). Continue?" "n" || die "Aborted."
 fi
 
 # --- Phase 1: base system -------------------------------------------------
-info "Phase 1/5: base system"
-run sudo apt-get update
-if [ "$DO_UPGRADE" = "1" ]; then
-  info "(--upgrade-base: apt full-upgrade of the whole base OS)"
-  run sudo apt-get full-upgrade -y
-  run sudo apt-get autoremove -y
+if [ "$CONFIGS_ONLY" = "1" ]; then
+  info "Phase 1/5: base system (skipped — --configs-only)"
 else
-  info "(base OS full-upgrade skipped by default — opt in with --upgrade-base)"
+  info "Phase 1/5: base system"
+  run sudo apt-get update
+  if [ "$DO_UPGRADE" = "1" ]; then
+    info "(--upgrade-base: apt full-upgrade of the whole base OS)"
+    run sudo apt-get full-upgrade -y
+    run sudo apt-get autoremove -y
+  else
+    info "(base OS full-upgrade skipped by default — opt in with --upgrade-base)"
+  fi
 fi
 
 # --- Phase 2: packages ----------------------------------------------------
-info "Phase 2/5: packages"
+if [ "$CONFIGS_ONLY" = "1" ]; then
+  info "Phase 2/5: packages (skipped — --configs-only)"
+else
+  info "Phase 2/5: packages"
 
 install_apt_packages() {
   local -a pkgs=() p
@@ -129,6 +151,7 @@ install_flatpak_apps() {
 install_apt_packages
 install_snap_packages
 install_flatpak_apps
+fi
 
 # --- Phase 3: apps (fresh install + config overwrite) ----------------------
 info "Phase 3/5: apps"
@@ -155,6 +178,14 @@ install_app() {
   check="$(app_get "$name" '.check_cmd')"
   pkg="$(app_get "$name" '.package')"
   [ -n "$pkg" ] || pkg="$name"
+
+  # --configs-only: skip ALL installs, restore config only.
+  if [ "$CONFIGS_ONLY" = "1" ]; then
+    if [ "$BACKUPS_PRESENT" = "1" ]; then
+      restore_app_config "$name"
+    fi
+    return 0
+  fi
 
   # Dependencies are auto-installed with the app; they are never separate
   # inventory items (AGENTS.md principle 4).
@@ -197,7 +228,9 @@ install_app() {
     esac
   fi
 
-  restore_app_config "$name"
+  if [ "$PACKAGES_ONLY" != "1" ]; then
+    restore_app_config "$name"
+  fi
 }
 
 while IFS= read -r name; do
@@ -218,36 +251,40 @@ restore_services() {
     [ "$start" = "true" ] || start="false"
     sdir="$BACKUPS_DIR/services/$unit"
     if [ "$BACKUPS_PRESENT" = "1" ] && [ -f "$sdir/unit" ]; then
-      # Order matters: install the unit + reload, then restore the service's
-      # CONFIG (env file, config dir, ...) BEFORE enabling/starting it, so the
-      # service boots with its real configuration on first start (principle:
-      # fresh install, then config overwrite).
-      if [ "$target" = "user" ]; then
-        dest="$HOME/.config/systemd/user/$unit"
-        run mkdir -p "$HOME/.config/systemd/user"
-        run cp "$sdir/unit" "$dest"
-        run systemctl --user daemon-reload
-      else
-        dest="/etc/systemd/system/$unit"
-        run sudo cp "$sdir/unit" "$dest"
-        run sudo systemctl daemon-reload
+      # Order matters (AGENTS.md principle): install the unit + reload, then
+      # restore the service's CONFIG BEFORE enabling/starting it, so the
+      # service boots with its real configuration on first start.
+      if [ "$CONFIGS_ONLY" = "0" ]; then
+        if [ "$target" = "user" ]; then
+          dest="$HOME/.config/systemd/user/$unit"
+          run mkdir -p "$HOME/.config/systemd/user"
+          run cp "$sdir/unit" "$dest"
+          run systemctl --user daemon-reload
+        else
+          dest="/etc/systemd/system/$unit"
+          run sudo cp "$sdir/unit" "$dest"
+          run sudo systemctl daemon-reload
+        fi
+        ok "  $unit: unit installed ($target)"
       fi
-      # Restore any config files declared for this service (env file, config dir...).
-      if [ -d "$sdir/home" ]; then
-        run rsync -a "$sdir/home/" "$HOME/"
-        ok "  $unit: config restored to \$HOME"
+      if [ "$PACKAGES_ONLY" != "1" ]; then
+        if [ -d "$sdir/home" ]; then
+          run rsync -a "$sdir/home/" "$HOME/"
+          ok "  $unit: config restored to \$HOME"
+        fi
+        if [ -d "$sdir/root" ]; then
+          run sudo rsync -a "$sdir/root/" /
+          ok "  $unit: config restored to /"
+        fi
       fi
-      if [ -d "$sdir/root" ]; then
-        run sudo rsync -a "$sdir/root/" /
-        ok "  $unit: config restored to /"
-      fi
-      # Now enable/start with the restored config in place.
-      if [ "$target" = "user" ]; then
-        [ "$enable" = "true" ] && run systemctl --user enable "$unit"
-        [ "$start" = "true" ] && run systemctl --user start "$unit"
-      else
-        [ "$enable" = "true" ] && run sudo systemctl enable "$unit"
-        [ "$start" = "true" ] && run sudo systemctl start "$unit"
+      if [ "$CONFIGS_ONLY" = "0" ]; then
+        if [ "$target" = "user" ]; then
+          [ "$enable" = "true" ] && run systemctl --user enable "$unit"
+          [ "$start" = "true" ] && run systemctl --user start "$unit"
+        else
+          [ "$enable" = "true" ] && run sudo systemctl enable "$unit"
+          [ "$start" = "true" ] && run sudo systemctl start "$unit"
+        fi
       fi
       ok "  service: $unit ($target)"
     else
@@ -259,6 +296,9 @@ restore_services() {
 restore_services
 
 # --- Phase 5: dotfiles + user dirs -------------------------------------------
+if [ "$PACKAGES_ONLY" = "1" ]; then
+  info "Phase 5/5: dotfiles & user dirs (skipped — --packages-only)"
+else
 info "Phase 5/5: dotfiles & user dirs"
 
 restore_dotfiles() {
@@ -306,6 +346,7 @@ restore_user_dirs() {
 }
 
 restore_user_dirs
+fi
 
 # --- Wrap-up ---------------------------------------------------------------
 echo

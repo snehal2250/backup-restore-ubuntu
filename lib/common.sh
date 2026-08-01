@@ -19,6 +19,11 @@ BACKUPS_DIR="$REPO_ROOT/backups"
 # Local-disk mirror destination for backup.sh (env-overridable; empty string disables).
 # NOTE: use "-" (not ":-"): an empty BACKUP_DEST must stay empty so backup.sh
 # skips the mirror, per the documented "BACKUP_DEST= disables" semantics.
+# To change the default destination for your machine, set BACKUP_DEST in the
+# environment before running backup.sh, e.g.:
+#   BACKUP_DEST=/media/$USER/Storage/backup-restore-ubuntu ./backup.sh
+#   # or export it in your shell's rc file:
+#   export BACKUP_DEST=/media/$USER/Storage/backup-restore-ubuntu
 BACKUP_DEST="${BACKUP_DEST-/media/vikram-athare/Storage/backup-restore-ubuntu}"
 # Keep at most this many timestamped snapshots in BACKUP_DEST.
 BACKUP_KEEP="${BACKUP_KEEP:-5}"

@@ -103,7 +103,12 @@ keeping the last `BACKUP_KEEP` snapshots; set `BACKUP_DEST=` to disable the mirr
 
 ## Phase 4 — Future enhancements (⬜ backlog)
 
+- ✅ `--configs-only` / `--packages-only` flags added to `restore.sh` (mutually exclusive):
+  `--configs-only` skips all installs and only restores config from `backups/`;
+  `--packages-only` installs fresh but skips all config restore.
+- ✅ `backup-info.txt` raised condition fixed: the file is now written atomically
+  only on completion (no truncation window mid-run). Missing or status-absent file
+  means the last run did not complete.
 - Grow the seed catalog (`lib/catalog.sh`) as the user adopts apps.
 - Optional git-crypt or age-based encryption for committing `backups/`.
-- Optional `restore.sh --configs-only` / `--packages-only` sub-phases.
 - Optional integrity check (`restore.sh --verify`) comparing declared inventory vs system.

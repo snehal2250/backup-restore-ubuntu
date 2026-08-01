@@ -29,7 +29,6 @@ fi
 info "4/4 — Inventory apps (npm/pipx/cargo) + npm"
 if command -v npm >/dev/null 2>&1; then
   sudo npm install -g npm@latest || true
-  sudo npm update -g || true
 else
   echo "  npm not installed; skipping npm."
 fi

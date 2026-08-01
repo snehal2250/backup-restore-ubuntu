@@ -33,6 +33,8 @@ Flags:
 ./restore.sh --yes           # skip all prompts
 ./restore.sh --dry-run       # preview everything; only yq auto-installs if missing
 ./restore.sh --upgrade-base  # OPT-IN: also apt full-upgrade the base OS + autoremove
+./restore.sh --configs-only  # restore config only (skip all installs)
+./restore.sh --packages-only # install fresh only (skip config restore)
 ```
 
 ---

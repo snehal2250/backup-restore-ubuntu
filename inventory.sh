@@ -473,7 +473,8 @@ cmd_remove_user_dir() {
 # ---------------------------------------------------------------------------
 # review / wizard — find undeclared apps on this system
 # ---------------------------------------------------------------------------
-# Candidates = top-level ~/.config dirs that are not OS noise and not declared.
+# Candidates = top-level ~/.config dirs + well-known dot-dirs outside ~/.config
+# (e.g. ~/.azure, ~/.docker, ~/.terraform.d) that are not OS noise and not declared.
 scan_candidates() {
   local noise="dconf gtk-3.0 gtk-4.0 pulse ibus gnome-session user-dirs.dirs enchant glib-2.0 xdg goa-1.0 evolution tracker3 nautilus gedit mimeapps.list autostart"
   local d base
@@ -484,10 +485,29 @@ scan_candidates() {
   # '[]?' yields nothing for apps with no config_paths — no '// empty' fallback
   # (the installed yq v4.53.3 rejects the 'empty' keyword).
   declared_configs="$(yq -r '.apps[].config_paths[]?' "$INVENTORY_FILE" | sed -n 's#.*/##p')"
+
+  # Pass 1: ~/.config/<app>/ directories.
   for d in "$HOME"/.config/*/; do
     [ -d "$d" ] || continue
     base="$(basename "$d")"
     echo "$noise" | grep -Fwq "$base" && continue
+    yaml_list '.apps[] | .name' | grep -Fqx "$base" && continue
+    printf '%s\n' "$declared_configs" | grep -Fqx "$base" && continue
+    printf '%s\n' "$base"
+  done
+
+  # Pass 2: well-known config directories outside ~/.config/ (~/.azure,
+  # ~/.docker, ~/.terraform.d, ~/.cloudflared, etc.). These are NOT auto-
+  # candidates for the wizard (the dir name doesn't always match the binary
+  # name — e.g. ~/.azure → app 'az'), but seeing them in 'review' tells the
+  # user a config dir exists that might belong to an undeclared app.
+  local sys_dirs="local cache share ssh gnupg snap npm cargo vscode vscode-server java dbus mozilla thunderbird . .."
+  for d in "$HOME"/.*/; do
+    [ -d "$d" ] || continue
+    base="$(basename "$d")"
+    echo "$sys_dirs" | grep -Fwq "$base" && continue
+    echo "$noise" | grep -Fwq "$base" && continue
+    [[ "$base" != "." && "$base" != ".." ]] || continue
     yaml_list '.apps[] | .name' | grep -Fqx "$base" && continue
     printf '%s\n' "$declared_configs" | grep -Fqx "$base" && continue
     printf '%s\n' "$base"

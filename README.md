@@ -49,6 +49,8 @@ copying of the OS itself.
 #    Full step-by-step runbook: docs/RESTORE.md
 #    VirtualBox rehearsal (test the restore path in a VM): docs/REHEARSAL-VIRTUALBOX.md
 ./restore.sh                        # prompts; --yes to skip, --dry-run to preview
+#   --configs-only = restore config only (skip all installs)
+#   --packages-only = install fresh only (skip config restore)
 ```
 
 Then, optionally, as a separate exercise (only after the plain restore + verification):
@@ -141,12 +143,13 @@ are never touched.
 service.
 
 **How do I know the last backup succeeded?** `backup.sh` writes `backups/backup-info.txt`
-with run metadata at the START of every run, and appends a success marker **only when the
-whole run finishes**: `status: ok`, a `finished:` timestamp, and a `mirror:` line
-(`ok` / `failed` / `disabled`). So:
+with run metadata and a success marker **only when the whole run completes** (a single
+atomic write — no mid-run truncation window). A missing or status-absent file means the
+last run did not complete. The marker includes `status: ok`, a `finished:` timestamp, and
+a `mirror:` line (`ok` / `failed` / `disabled`):
 
 ```bash
-# local truth (after any ./backup.sh run or @reboot cron run):
+# local truth (file exists with 'status: ok' = last run completed):
 tail -5 backups/backup-info.txt      # expect a 'status: ok' line
 # quick yes/no:
 grep -q '^status: ok' backups/backup-info.txt && echo 'BACKUP OK' || echo 'BACKUP INCOMPLETE'
@@ -163,14 +166,14 @@ tail -5 "$newest/backup-info.txt"
 | `status: ok` + `mirror: ok` | Run completed **and** off-machine copy is in place | nothing |
 | `status: ok` + `mirror: failed` | Config captured, but the off-machine copy **failed** | fix `BACKUP_DEST` (disk mounted? writable?) and re-run `./backup.sh` |
 | `status: ok` + `mirror: disabled` | Run completed; no off-machine copy (`BACKUP_DEST` unset) | nothing — expected if mirror is intentionally off |
-| no `status: ok` line | Last run did **not** complete (aborted mid-way) | check the run output/log for the error and re-run |
+| no `status: ok` line | **File missing or run didn't complete** (file is only written on completion) | check the run output/log for the error and re-run |
 
-> **Local vs. snapshot marker:** `backups/backup-info.txt` reflects the **last run** — a
-> fresh run truncates it immediately, and only a fully completed run re-appends `status: ok`.
-> The newest mirror snapshot only gets the marker on a **successful** run. So if the last
-> run aborted, the local file shows `status: ok` absent while the newest snapshot still
-> carries the previous (older) run's marker. Check the **local** file for the truth about
-> the most recent run; use a snapshot whose marker you verified locally first.
+> **Local vs. snapshot marker:** `backups/backup-info.txt` is only written when a run
+> completes — a missing file means no completed run exists locally (the most recent
+> mirror snapshot still holds the previous successful run's marker). So if a run
+> aborted, the local file is absent while the newest snapshot carries the older run's
+> marker. Check the **local** file for the latest run's truth; use a snapshot whose
+> marker you verified locally first.
 
 **Is `backups/` committed?** No — it's git-ignored (config can contain secrets).
 `backup.sh` automatically mirrors the whole folder (no filtering) to the local disk at

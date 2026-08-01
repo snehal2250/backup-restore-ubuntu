@@ -91,7 +91,7 @@ lib/
                               slack, onlyoffice, storage-explorer, cloudflared, ...)
 inventory.sh              <- MANUAL tool: list / add-* / remove-* / review / wizard
 backup.sh                 <- captures configs + service units + dotfiles -> backups/
-restore.sh                <- fresh install + config overwrite (--dry-run/--yes/--upgrade-base)
+restore.sh                <- fresh install + config overwrite (--dry-run/--yes/--upgrade-base/--configs-only/--packages-only)
 update_all_ubuntu.sh      <- updates apt/snap/flatpak/npm + inventory apps
 schedule_cron.sh          <- @reboot scheduled backup
 backups/                  <- output of backup.sh (GIT-IGNORED; contains personal config)
@@ -208,6 +208,8 @@ commands. `BACKUP_DEST=` disables the mirror. Never commit `backups/` (see docs/
 ```bash
 ./restore.sh                 # prompts; adds --yes to skip prompts, --dry-run to preview
 ./restore.sh --upgrade-base  # OPT-IN: also apt full-upgrade of the base OS
+./restore.sh --configs-only  # restore config only (skip all installs)
+./restore.sh --packages-only # install fresh only (skip config restore)
 ```
 By default restore only touches the items declared in the inventory (principle 4); it
 never upgrades the whole base OS unless `--upgrade-base` is passed.
