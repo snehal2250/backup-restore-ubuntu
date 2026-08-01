@@ -3,28 +3,16 @@
 # inventory.sh — the MANUAL tool for declaring what to back up & restore.
 #
 # This is your (the user's) responsibility to run. It only edits
-# inventory/inventory.yaml — it never touches the system.
-#
-#   ./inventory.sh                          # same as: list
-#   ./inventory.sh list                     # show everything declared + status
-#   ./inventory.sh add-package apt|snap|flatpak <name>
-#   ./inventory.sh remove-package apt|snap|flatpak <name>
-#   ./inventory.sh add-app <name>           # interactive wizard (catalog-aware)
-#   ./inventory.sh remove-app <name>
-#   ./inventory.sh add-service              # interactive wizard
-#   ./inventory.sh remove-service <unit>
-#   ./inventory.sh add-user-dir <path>      # declare a whole user-data folder (e.g. ~/Documents)
-#   ./inventory.sh remove-user-dir <path>
-#   ./inventory.sh review                   # suggest undeclared apps found on this system
-#   ./inventory.sh wizard                   # guided: scan the system, declare apps one by one
+# inventory/inventory.yaml — it never touches the system (except for the
+# optional service unit copy in add-service).
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
-# shellcheck disable=SC1091  # sourced helper library, not an executable script
+# shellcheck disable=SC1091
 source "$LIB_DIR/catalog.sh"
 
-YQ_AUTO=2   # interactive tool: if yq is missing, ask the user to install it
+YQ_AUTO=2
 
 [ -f "$INVENTORY_FILE" ] || die "Inventory file not found: $INVENTORY_FILE"
 
@@ -34,6 +22,7 @@ Usage: ./inventory.sh <command> [args]
 
 Commands:
   list                                   Show the current inventory + installed status
+  validate                               Validate inventory.yaml schema and semantics
   add-package apt|snap|flatpak <name>    Add a package to a list
   remove-package apt|snap|flatpak <name> Remove a package from a list
   add-app <name>                         Declare an app (interactive wizard)
@@ -47,12 +36,18 @@ Commands:
 EOF
 }
 
-# Minimal YAML double-quote escaping for values written into inventory.yaml.
 esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
-# ---------------------------------------------------------------------------
-# list
-# ---------------------------------------------------------------------------
+# --- validate ------------------------------------------------------------
+cmd_validate() {
+  if validate_inventory; then
+    ok "Inventory is valid."
+  else
+    die "Inventory has issues — see warnings above."
+  fi
+}
+
+# --- list ----------------------------------------------------------------
 print_plain_list() {
   local key="$1" label="$2" item base
   echo "  $label"
@@ -84,25 +79,49 @@ cmd_list() {
   require_yq "$YQ_AUTO"
   echo "Inventory: $INVENTORY_FILE"
   echo
+
+  local app_count
+  app_count="$(yaml_list '.apps[] | .name' | { grep -c . 2>/dev/null || true; })"
+  app_count="${app_count:-0}"
+  echo "=== Apps ($app_count) ==="
+  # Single yq pass to extract all app metadata — avoids repeated yq invocations
+  # which have significant startup overhead (especially with snap yq).
+  while IFS=$'\t' read -r name itype check pkg cfg_cnt dep_cnt; do
+    [ -n "$name" ] || continue
+    # Convert sentinel empty-string markers back.
+    [ "$pkg" = "___EMPTY___" ] && pkg=""
+    local tags="  ${itype:-?}"
+    [ -n "$pkg" ] && tags="$tags  pkg=$pkg"
+    [ "${cfg_cnt:-0}" -gt 0 ] && tags="$tags  configs=$cfg_cnt"
+    [ "${dep_cnt:-0}" -gt 0 ] && tags="$tags  deps=$dep_cnt"
+    [ "${cfg_cnt:-0}" -eq 0 ] && [ "$itype" != "snap" ] && tags="$tags  (no config)"
+    if is_app_installed "$name"; then
+      printf '    [x] %-20s %s\n' "$name" "$tags"
+    else
+      printf '    [ ] %-20s %s\n' "$name" "$tags"
+    fi
+  done < <(yq -r '
+    .apps[] | [
+      .name,
+      (.install_type // "___EMPTY___"),
+      (.check_cmd // "___EMPTY___"),
+      (.package // "___EMPTY___"),
+      ((.config_paths // []) | length),
+      ((.depends_apt   // []) | length)
+    ] | @tsv
+  ' "$INVENTORY_FILE")
+  echo
+
   echo "=== Packages ==="
   print_plain_list apt_packages "APT:"
   print_plain_list snap_packages "SNAP:"
   print_plain_list flatpak_apps "FLATPAK:"
   echo
+
   echo "=== Dotfiles ==="
   print_plain_list dotfiles "(in \$HOME):"
   echo
-  echo "=== Apps ==="
-  while IFS= read -r name; do
-    [ -n "$name" ] || continue
-    itype="$(app_get "$name" '.install_type')"
-    if is_app_installed "$name"; then
-      printf '    [x] %-16s %s\n' "$name" "${itype:-?}"
-    else
-      printf '    [ ] %-16s %s\n' "$name" "${itype:-?}"
-    fi
-  done < <(yaml_list '.apps[] | .name')
-  echo
+
   echo "=== User dirs ==="
   while IFS= read -r d; do
     [ -n "$d" ] || continue
@@ -113,20 +132,23 @@ cmd_list() {
     fi
   done < <(yaml_list '.user_dirs[]')
   echo
+
   echo "=== Services ==="
-  while IFS=$'\t' read -r unit target; do
+  while IFS=$'\t' read -r unit target enable start; do
     [ -n "$unit" ] || continue
+    [ "$target" = "user" ] || target="system"
+    local tags="$target"
+    [ "$enable" = "true" ] && tags="$tags  enabled"
+    [ "$start" = "true" ] && tags="$tags  start"
     if [ "$target" = "user" ]; then
-      if systemctl --user is-enabled "$unit" >/dev/null 2>&1; then echo "    [x] $unit (user)"; else echo "    [ ] $unit (user)"; fi
+      if systemctl --user is-enabled "$unit" >/dev/null 2>&1; then echo "    [x] $unit ($tags)"; else echo "    [ ] $unit ($tags)"; fi
     else
-      if systemctl is-enabled "$unit" >/dev/null 2>&1; then echo "    [x] $unit (system)"; else echo "    [ ] $unit (system)"; fi
+      if systemctl is-enabled "$unit" >/dev/null 2>&1; then echo "    [x] $unit ($tags)"; else echo "    [ ] $unit ($tags)"; fi
     fi
-  done < <(yq -r '.services[] | [.unit, (.target // "system")] | @tsv' "$INVENTORY_FILE")
+  done < <(yq -r '.services[] | [.unit, (.target // "system"), (.enable // false | tostring), (.start // false | tostring)] | @tsv' "$INVENTORY_FILE")
 }
 
-# ---------------------------------------------------------------------------
-# add-package / remove-package
-# ---------------------------------------------------------------------------
+# --- add-package / remove-package -----------------------------------------
 _package_key() {
   case "$1" in
     apt) echo apt_packages ;;
@@ -171,12 +193,11 @@ cmd_remove_package() {
   ok "Removed $type package '$name'."
 }
 
-# ---------------------------------------------------------------------------
-# add-app (wizard) / remove-app
-# ---------------------------------------------------------------------------
+# --- add-app (wizard) / remove-app ----------------------------------------
 write_app() {
   local name="$1" desc="$2" itype="$3" icmd="$4" check="$5" deps="$6" paths="$7" pkg="${8:-}" excl="${9:-}"
-  local tmp="/tmp/inv-app-${name}.yaml" d e
+  local tmp
+  tmp="$(mktemp)"
   {
     printf -- '- name: "%s"\n' "$(esc "$name")"
     [ -n "$desc" ] && printf '  description: "%s"\n' "$(esc "$desc")"
@@ -190,8 +211,6 @@ write_app() {
     fi
     if [ -n "$paths" ]; then
       echo "  config_paths:"
-      # paths is newline-delimited (see cmd_add_app) so entries containing
-      # spaces (e.g. ~/.config/MongoDB Compass) survive intact.
       while IFS= read -r d; do
         [ -n "$d" ] || continue
         printf '    - "%s"\n' "$(esc "$d")"
@@ -199,11 +218,6 @@ write_app() {
     fi
     if [ -n "$excl" ]; then
       echo "  exclude:"
-      # exclude is space-delimited (rsync patterns, single tokens — see
-      # catalog.sh); a pattern that itself needs a space should use a glob
-      # (e.g. Safe*Browsing) or be hand-edited in inventory.yaml.
-      # NOTE: split with read -ra, NOT 'for e in $excl' — an unquoted expansion
-      # would glob-expand patterns like Safe*Browsing against the CWD.
       local -a e_arr=()
       read -ra e_arr <<< "$excl"
       for e in "${e_arr[@]}"; do
@@ -217,7 +231,8 @@ write_app() {
 
 write_service() {
   local unit="$1" target="$2" enable="$3" start="$4" paths="$5"
-  local tmp="/tmp/inv-service.yaml" d
+  local tmp
+  tmp="$(mktemp)"
   {
     printf -- '- unit: "%s"\n' "$(esc "$unit")"
     printf '  target: %s\n' "$target"
@@ -225,8 +240,6 @@ write_service() {
     printf '  start: %s\n' "$start"
     if [ -n "$paths" ]; then
       echo "  config_paths:"
-      # paths is newline-delimited (see cmd_add_service) so entries containing
-      # spaces survive intact.
       while IFS= read -r d; do
         [ -n "$d" ] || continue
         printf '    - "%s"\n' "$(esc "$d")"
@@ -254,9 +267,6 @@ cmd_add_app() {
   if [ -n "$template" ]; then
     while IFS='=' read -r k v; do
       [ -n "$k" ] || continue
-      # Repeated keys (e.g. a second config_paths= line) accumulate newline-
-      # joined, which is exactly the newline-delimited contract write_app
-      # consumes — lets a catalog entry express multiple config paths.
       if [ -n "${!k:-}" ]; then
         printf -v "$k" '%s\n%s' "${!k}" "$v"
       else
@@ -274,13 +284,13 @@ cmd_add_app() {
       ok "Added app '$name'."
       return 0
     fi
-    # User declined the catalog defaults -> run the full manual wizard instead.
-    desc=""; itype=""; icmd=""; check=""; deps=""; paths=""
+    desc=""; itype=""; icmd=""; check=""; deps=""; paths=""; pkg=""; excl=""
     unset description install_type install_command check_cmd depends_apt config_paths package exclude
     echo
     echo "Running the manual wizard instead."
   fi
 
+  # Install method.
   if [ -z "$itype" ]; then
     echo "Install method for '$name':"
     local i=1 t
@@ -310,18 +320,25 @@ cmd_add_app() {
       ;;
   esac
   if [ -z "$check" ]; then
-    printf 'Binary to check for "already installed" (optional): '
+    printf 'Binary to check for "already installed" (recommended): '
     read -r check
   fi
-  # Dependencies are NOT asked here on purpose (AGENTS.md principle 4): the
-  # user only thinks about the main app. depends_apt is set from the catalog
-  # or edited directly in inventory.yaml if ever needed.
 
-  # Detect existing config locations for this app.
-  local candidates=() c i=1 selected n
+  # Dependencies — ask the user if they know them (catalog was already offered above).
+  if [ -z "$deps" ]; then
+    printf 'APT dependencies (space-separated, e.g. "nodejs npm" — optional): '
+    read -r deps
+  fi
+
+  # Detect existing config locations.
+  local candidates=() c i selected n ans
   for c in "$HOME/.config/$name" "$HOME/.$name" "$HOME/.local/share/$name"; do
     [ -e "$c" ] && candidates+=("$c")
   done
+  # Also check common snap paths.
+  if [ -d "$HOME/snap/$name/common" ]; then
+    candidates+=("$HOME/snap/$name/common")
+  fi
   if [ "${#candidates[@]}" -gt 0 ] && [ -z "$paths" ]; then
     echo "Existing config locations detected for '$name':"
     i=1
@@ -342,6 +359,24 @@ cmd_add_app() {
     fi
   fi
 
+  # Offer to add additional config paths.
+  if [ -z "$paths" ]; then
+    printf 'Config paths (space-separated, ~-form, optional): '
+    read -r ans
+    if [ -n "$ans" ]; then
+      for c in $ans; do
+        paths+="${c/#$HOME\//~\/}"$'\n'
+      done
+      paths="${paths%$'\n'}"
+    fi
+  fi
+  if [ -n "$paths" ]; then
+    echo "  Config paths declared:"
+    while IFS= read -r p; do printf '    ~%s\n' "${p#~}"; done <<< "$paths"
+  else
+    warn "  No config paths declared — this app's settings will NOT be backed up or restored."
+  fi
+
   write_app "$name" "$desc" "$itype" "$icmd" "$check" "$deps" "$paths" "$pkg" "$excl"
   ok "Added app '$name'."
 }
@@ -357,17 +392,22 @@ cmd_remove_app() {
   ok "Removed app '$name'."
 }
 
-# ---------------------------------------------------------------------------
-# add-service (wizard) / remove-service
-# ---------------------------------------------------------------------------
+# --- add-service (wizard) / remove-service --------------------------------
 cmd_add_service() {
   local unit="" target="system" src="" sel=""
   printf 'Unit file name (e.g. myservice.service): '
   read -r unit
   [ -n "$unit" ] || die "Unit name required."
+
+  # Validate basic systemd unit name.
+  if ! [[ "$unit" =~ ^[a-zA-Z0-9@._:-]+\.(service|timer|socket|path)$ ]]; then
+    die "Invalid systemd unit name: '$unit'. Must end in .service/.timer/.socket/.path and contain no slashes or control characters."
+  fi
+
   if yaml_list '.services[] | .unit' | grep -Fqx "$unit"; then
     die "Service '$unit' is already in the inventory."
   fi
+
   echo "Where does this service live?"
   echo "  1) system  (/etc/systemd/system)"
   echo "  2) user    (~/.config/systemd/user)"
@@ -394,14 +434,10 @@ cmd_add_service() {
   confirm "Enable on boot?" "y" && enable="true"
   confirm "Start after restore?" "y" && start="true"
 
-  # Optional config files this service needs (env file, config dir, helper script...).
   local paths="" p norm=""
   printf 'Config paths this service needs (space-separated, optional): '
   read -r paths
   if [ -n "$paths" ]; then
-    # newline-delimit so a path containing spaces survives intact. Note: input is
-    # space-split, so a service path that itself contains a space cannot be entered
-    # here — hand-edit inventory.yaml for that case.
     for p in $paths; do
       norm+="${p/#$HOME\//~\/}"$'\n'
     done
@@ -423,20 +459,17 @@ cmd_remove_service() {
   ok "Removed service '$unit'."
 }
 
-# ---------------------------------------------------------------------------
-# add-user-dir / remove-user-dir — whole user-data folders (e.g. ~/Documents)
-# ---------------------------------------------------------------------------
-# Normalize a path to the '~' form used in inventory.yaml.
+# --- add-user-dir / remove-user-dir --------------------------------------
 _norm_dir() {
   local p="$1"
-  p="${p%/}"   # strip a trailing slash: /home/u/Documents/ -> /home/u/Documents
+  p="${p%/}"
   case "$p" in
     "$HOME"/*)
-      # shellcheck disable=SC2088  # literal '~/...' is the intentional inventory ~-form
+      # shellcheck disable=SC2088
       p="~/${p#"$HOME"/}"
       ;;
     "$HOME") p="~" ;;
-    ~/*)     : ;;                 # already in ~-form (e.g. the user typed ~/Documents)
+    ~/*)     : ;;
     *)
       warn "Path must start with ~ or \$HOME (got: '$p')." >&2
       return 1
@@ -470,23 +503,13 @@ cmd_remove_user_dir() {
   ok "Removed user dir '$dir'."
 }
 
-# ---------------------------------------------------------------------------
-# review / wizard — find undeclared apps on this system
-# ---------------------------------------------------------------------------
-# Candidates = top-level ~/.config dirs + well-known dot-dirs outside ~/.config
-# (e.g. ~/.azure, ~/.docker, ~/.terraform.d) that are not OS noise and not declared.
+# --- review / wizard -----------------------------------------------------
 scan_candidates() {
   local noise="dconf gtk-3.0 gtk-4.0 pulse ibus gnome-session user-dirs.dirs enchant glib-2.0 xdg goa-1.0 evolution tracker3 nautilus gedit mimeapps.list autostart"
   local d base
-  # Basenames of every declared app's config_paths, so already-declared apps
-  # whose config dir name differs from the app name (Code vs code, manicode vs
-  # freebuff, "MongoDB Compass" vs mongodb-compass) are not reported as gaps.
   local declared_configs
-  # '[]?' yields nothing for apps with no config_paths — no '// empty' fallback
-  # (the installed yq v4.53.3 rejects the 'empty' keyword).
   declared_configs="$(yq -r '.apps[].config_paths[]?' "$INVENTORY_FILE" | sed -n 's#.*/##p')"
 
-  # Pass 1: ~/.config/<app>/ directories.
   for d in "$HOME"/.config/*/; do
     [ -d "$d" ] || continue
     base="$(basename "$d")"
@@ -496,11 +519,6 @@ scan_candidates() {
     printf '%s\n' "$base"
   done
 
-  # Pass 2: well-known config directories outside ~/.config/ (~/.azure,
-  # ~/.docker, ~/.terraform.d, ~/.cloudflared, etc.). These are NOT auto-
-  # candidates for the wizard (the dir name doesn't always match the binary
-  # name — e.g. ~/.azure → app 'az'), but seeing them in 'review' tells the
-  # user a config dir exists that might belong to an undeclared app.
   local sys_dirs="local cache share ssh gnupg snap npm cargo vscode vscode-server java dbus mozilla thunderbird . .."
   for d in "$HOME"/.*/; do
     [ -d "$d" ] || continue
@@ -518,14 +536,19 @@ cmd_review() {
   require_yq "$YQ_AUTO"
   echo "Apps found on this system that are NOT declared in the inventory:"
   echo
+  local found=0
   while IFS= read -r base; do
     [ -n "$base" ] || continue
+    found=1
     if command -v "$base" >/dev/null 2>&1; then
       printf '  [%s] %s  (binary: %s)\n' "config" "$base" "$(command -v "$base")"
     else
       printf '  [%s] %s\n' "config" "$base"
     fi
   done < <(scan_candidates)
+  if [ "$found" = "0" ]; then
+    echo "  (none — all detected config dirs appear declared)"
+  fi
   echo
   echo "Declare any of these with: ./inventory.sh add-app <name>"
 }
@@ -549,10 +572,11 @@ cmd_wizard() {
   echo "Run ./inventory.sh list to review the result."
 }
 
-# ---------------------------------------------------------------------------
+# --- dispatch -------------------------------------------------------------
 cmd="${1:-list}"
 case "$cmd" in
   list)            shift; cmd_list "$@" ;;
+  validate)        shift; cmd_validate "$@" ;;
   add-package)     shift; cmd_add_package "$@" ;;
   remove-package)  shift; cmd_remove_package "$@" ;;
   add-app)         shift; cmd_add_app "$@" ;;

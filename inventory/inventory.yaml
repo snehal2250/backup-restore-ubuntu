@@ -18,28 +18,29 @@
 #                config_paths use '~' form and are the ONLY things backed up
 #                exclude: optional rsync exclude patterns (one per line) to keep caches,
 #                model stores and re-downloadable binaries OUT of the backup
+#                extensions: optional list of extension/model IDs to re-install AFTER restore
+#                  (VS Code extensions via 'code --install-extension', Azure CLI via
+#                  'az extension add', Ollama models via 'ollama pull'). IDs only — no versions.
+#                groups: optional list of Unix group names the user needs membership in
+#                  (e.g. docker). Restore will add the user to these groups.
+#                default_shell: optional (top-level), the login shell to set via chsh
+#                  (e.g. /usr/bin/fish). The shell package must be declared as an app.
 #   * services:  only CUSTOM services the user installed; target system|user
 # =============================================================================
 
+default_shell: /usr/bin/fish
 apt_packages: []
-# - git
-# - curl
 snap_packages: []
-# - code:classic
 flatpak_apps: []
-# - org.gimp.GIMP
 dotfiles: []
 # - .bashrc
 # - .gitconfig
 # - .profile
+groups:
+  - docker
 user_dirs:
   - ~/Documents
-  # Freebuff's per-project AI chat history (unique, NON-regenerable data — 486
-  # JSON/JSONL conversation files across 9 projects). Declared as a user_dir so it
-  # is captured whole (like Documents) and restored on a fresh machine.
   - ~/.config/manicode/projects
-# - ~/Pictures
-# - ~/Desktop
 apps:
   - name: "opencode"
     description: "AI coding agent (opencode.ai)"
@@ -50,17 +51,15 @@ apps:
       - "curl"
     config_paths:
       - "~/.config/opencode"
-    # node_modules is the app's installed runtime dependencies — re-installed with the app.
     exclude:
       - "node_modules"
   - name: "code"
     description: "Visual Studio Code"
     install_type: "snap-classic"
+    package: "code"
     check_cmd: "code"
     config_paths:
       - "~/.config/Code"
-    # Only real config (User/, Local Storage, ...) is captured; caches like
-    # CachedExtensionVSIXs / CachedData / Cache / WebStorage / logs regenerate.
     exclude:
       - "CachedExtensionVSIXs"
       - "CachedData"
@@ -127,7 +126,6 @@ apps:
       - "curl"
     config_paths:
       - "~/.config/MongoDB Compass"
-    # Electron caches regenerate on launch; real settings live in Local Storage/AppPreferences.
     exclude:
       - "Cache"
       - "GPUCache"
@@ -142,8 +140,6 @@ apps:
       - "wget"
     config_paths:
       - "~/.config/google-chrome"
-    # Profile (Default/, Local State, Preferences...) is captured; model stores,
-    # component caches and Safe Browsing data regenerate on launch.
     exclude:
       - "optimization_guide_model_store"
       - "component_crx_cache"
@@ -184,12 +180,6 @@ apps:
       - "Log"
   - name: "freebuff"
     description: "Freebuff AI coding assistant CLI (npm)"
-    # NOTE: ~/.config/manicode holds login credentials (credentials.json),
-    # settings, chat history AND a ~124MB bundled runtime binary. Only the
-    # small config files are captured here: projects/ (per-project AI chat
-    # memory) is declared as a USER DIR (see user_dirs below) so it is backed
-    # up whole and restorable; the runtime binary (freebuff/), ripgrep (rg/)
-    # and tree-sitter.wasm are EXCLUDED by policy — they re-install with npm.
     install_type: "npm-global"
     check_cmd: "freebuff"
     depends_apt:
@@ -211,7 +201,6 @@ apps:
       - "curl"
     config_paths:
       - "~/.docker"
-    # cli-plugins are downloaded plugin binaries (buildx, compose) — re-downloaded with the app.
     exclude:
       - "cli-plugins"
   - name: "tmux"
@@ -226,15 +215,15 @@ apps:
     check_cmd: "terraform"
     config_paths:
       - "~/.terraform.d"
-    # checkpoint_* are update-check caches that regenerate; credentials.tfrc.json IS captured.
     exclude:
       - "checkpoint_cache"
       - "checkpoint_signature"
   - name: "ollama"
     description: "Local LLM runner (snap)"
-    # NOTE: LLM models are NOT backed up (many GB, reproducible) — re-pull after restore.
     install_type: "snap"
     check_cmd: "ollama"
+    extensions:
+      - "llama3.2"
   - name: "az"
     description: "Microsoft Azure CLI (official MS apt repo)"
     install_type: "custom"
@@ -244,13 +233,13 @@ apps:
       - "curl"
     config_paths:
       - "~/.azure"
-    # cliextensions are installed extension packages (re-add with 'az extension add');
-    # logs/telemetry/commands are regenerable. Credentials + profile ARE captured.
     exclude:
       - "cliextensions"
       - "logs"
       - "telemetry"
       - "commands"
+    extensions:
+      - "azure-devops"
   - name: "azurite"
     description: "Azure Storage emulator (npm)"
     install_type: "npm-global"
@@ -260,8 +249,6 @@ apps:
       - "npm"
   - name: "slack"
     description: "Slack desktop (snap)"
-    # NOTE: snap GUI apps store config in revision dirs (~/snap/<name>/<rev>/) which
-    # do not survive snap revisions — no config_paths; re-login after restore.
     install_type: "snap"
     check_cmd: "slack"
   - name: "onlyoffice"
@@ -273,22 +260,6 @@ apps:
     description: "Azure Storage Explorer (snap)"
     install_type: "snap"
     check_cmd: "storage-explorer"
-# - name: opencode
-#   description: AI coding agent
-#   install_type: script
-#   install_command: curl -fsSL https://opencode.ai/install | bash
-#   check_cmd: opencode
-#   depends_apt:
-#     - curl
-#   config_paths:
-#     - ~/.config/opencode
-#
-# - name: go
-#   install_type: apt
-#   package: golang-go            # apt package name differs from the app name
-#   check_cmd: go
-#   config_paths:
-#     - ~/.config/go
 services:
   - unit: "cloudflared.service"
     target: system
@@ -297,7 +268,3 @@ services:
     config_paths:
       - "/etc/cloudflared/config.yml"
       - "~/.cloudflared"
-# - unit: myservice.service
-#   target: system
-#   enable: true
-#   start: true

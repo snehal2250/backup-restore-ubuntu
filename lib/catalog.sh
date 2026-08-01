@@ -5,11 +5,9 @@
 # catalog_lookup NAME prints a KEY=VALUE template (or nothing if the app is
 # unknown). Keys match the fields of an `apps:` entry in inventory.yaml:
 #   description, install_type, install_command, check_cmd, depends_apt, config_paths,
+#   package (override for apt/snap/snap-classic/flatpak),
+#   extensions (space-delimited extension/model IDs to re-install post-restore),
 #   exclude (space-delimited rsync patterns to keep caches/binaries out of backups)
-#
-# The catalog is only a SUGGESTION source for the manual inventory tool. It is
-# never consulted by backup.sh / restore.sh — those read ONLY inventory.yaml.
-# Extend this list as the user adopts more apps.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -30,8 +28,10 @@ EOF
       cat <<'EOF'
 description=Visual Studio Code
 install_type=snap-classic
+package=code
 check_cmd=code
 config_paths=~/.config/Code
+extensions=ms-vscode.cpptools ms-python.python ms-vscode.vscode-typescript-next
 exclude=CachedExtensionVSIXs CachedData Cache WebStorage logs
 EOF
       ;;
@@ -42,6 +42,7 @@ install_type=custom
 install_command=sudo apt-get update && sudo apt-get install -y ca-certificates curl && sudo install -m 0755 -d /etc/apt/keyrings && sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc && sudo chmod a+r /etc/apt/keyrings/docker.asc && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(grep VERSION_CODENAME /etc/os-release | cut -d= -f2) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null && sudo apt-get update && sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 check_cmd=docker
 depends_apt=curl
+groups=docker
 config_paths=~/.docker
 exclude=cli-plugins
 EOF
@@ -118,6 +119,7 @@ EOF
 description=Local LLM runner (snap) — models NOT backed up
 install_type=snap
 check_cmd=ollama
+extensions=llama3.2
 EOF
       ;;
     az)
@@ -129,6 +131,7 @@ check_cmd=az
 depends_apt=curl
 config_paths=~/.azure
 exclude=cliextensions logs telemetry commands
+extensions=azure-devops
 EOF
       ;;
     azurite)

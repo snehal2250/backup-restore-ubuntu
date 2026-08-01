@@ -14,15 +14,22 @@ This repo restores the user's Ubuntu desktop back to its last-known-good state
 Instead:
 
 - A single user-maintained file, `inventory/inventory.yaml`, declares which
-  **applications, packages, services, dotfiles, and user-data folders** the user wants.
+  **applications, packages, services, dotfiles, user-data folders, groups, default shell,
+  and extensions** the user wants.
 - `backup.sh` captures **only the configuration** for those declared items
   (config directories, systemd unit files, dotfiles) plus any whole **user-data
   folders** the user declared (`user_dirs`, e.g. `~/Documents`) into a git-ignored
-  `backups/` folder, then mirrors the whole folder (no filtering) to a configurable
-  local disk destination.
+  `backups/` folder using **transactional staging** (build in staging, validate, atomically
+  swap in — the last-known-good backup is never modified in place). A failure leaves the
+  previous backup intact.
 - `restore.sh` performs a **fresh install** of those items from their recommended sources
   (Ubuntu repositories, Snap Store, Flathub, official installers) at the **latest stable
-  versions**, then **overwrites** them with the backed-up configuration.
+  versions**, then **overwrites** them with the backed-up configuration. It validates the
+  backup manifest (requires `status: ok`) before restoring config, uses `bash -o pipefail`
+  for installer commands, checks installation by source (dpkg/snap/flatpak, not just
+  `command -v`), tracks all failures, and exits with a nonzero accumulated code if any
+  required item failed. Under `--packages-only`, services are installed but NOT
+  enabled/started (they need config restored first).
 
 Example (the canonical one): the user uses OpenCode.
 - The inventory declares the `opencode` app.
@@ -56,11 +63,26 @@ your settings over it.
 5. **Version-agnostic.** Never record, pin, or restore application/package versions.
    Latest stable wins, always. No `@1.2.3` anywhere in the data.
 6. **Idempotent and safe.** Scripts must be safe to run multiple times. `restore.sh`
-   prompts before modifying the system (`--yes` to skip) and supports `--dry-run`.
-   `--dry-run` previews the restore but may auto-install `yq` if missing — the only
-   thing a preview executes, because it must still read the inventory.
+   prompts before modifying the system (`--yes` to skip), supports `--dry-run`, and now
+   exits nonzero when required items fail (accumulated exit code via bitmask). `--dry-run`
+   previews the restore but may auto-install `yq` if missing — the only thing a preview
+   executes, because it must still read the inventory. Restore refuses to run as root and
+   dies on non-Ubuntu systems.
 7. **Everything is declarative.** Data lives in `inventory/inventory.yaml`; code lives in
    scripts under this repo. Never mix the two.
+8. **Backups are transactional.** Each `backup.sh` run builds a complete new generation in
+   a staging directory, validates it, writes a manifest, mirrors it, and atomically swaps
+   it in. The last-known-good backup is **never** modified in place. A failure to complete
+   simply leaves the staging directory (cleaned up on next run) and the previous backup
+   intact. `flock` prevents concurrent runs.
+9. **Truthful reporting.** `restore.sh` tracks every failure via an accumulated exit code
+   bitmask. If any required app install, config restore, or service fails, the script exits
+   nonzero. The backup manifest records per-artifact status (`captured`/`missing`/
+   `incomplete`/`empty`) so the user knows exactly what was captured.
+10. **Source-specific installation checks.** `restore.sh` checks whether an app is
+    installed by its declared source (`dpkg-query` for apt, `snap list` for snap,
+    `flatpak info` for flatpak, `npm list -g` for npm-global), not just by `command -v`
+    which can match unrelated binaries.
 
 ## 3. What we deliberately do NOT do (anti-patterns)
 
@@ -72,6 +94,10 @@ your settings over it.
 | Restoring apt sources/keyrings | Fresh Ubuntu ships correct sources — violates principle 1 |
 | Recording installed versions/snapshots | Version-agnostic (principle 5) |
 | Hardcoding app/package names in scripts | Violates principle 3 |
+| Running restore as root | Silently restores config into /root — violates principle 2 |
+| Overwriting backup in place | Previous good backup is destroyed before new one is proven |
+| `command -v` to check installed | May match wrong source or leftover binary |
+| Running services under `--packages-only` | Config hasn't been restored yet |
 
 ## 4. Repo map
 
@@ -85,15 +111,19 @@ docs/REHEARSAL-VIRTUALBOX.md <- tested VirtualBox rehearsal procedure (Oracle 7.
 inventory/
   inventory.yaml          <- THE source of truth (user-maintained, git-tracked)
 lib/
-  common.sh               <- shared helpers (logging, yq bootstrap, YAML getters, status checks)
+  common.sh               <- shared helpers (logging, yq bootstrap, YAML getters, status
+                             checkers, path safety, manifest helpers, inventory validation,
+                             concurrency protection, architecture detection)
   catalog.sh              <- seed catalog of common apps (opencode, code, docker, chrome,
-                              gh, gcloud, go, uv, tmux, terraform, ollama, az, azurite,
-                              slack, onlyoffice, storage-explorer, cloudflared, ...)
-inventory.sh              <- MANUAL tool: list / add-* / remove-* / review / wizard
+                             gh, gcloud, go, uv, tmux, terraform, ollama, az, azurite,
+                             slack, onlyoffice, storage-explorer, cloudflared, ...)
+inventory.sh              <- MANUAL tool: list / add-* / remove-* / review / wizard / validate
 backup.sh                 <- captures configs + service units + dotfiles -> backups/
-restore.sh                <- fresh install + config overwrite (--dry-run/--yes/--upgrade-base/--configs-only/--packages-only)
+                             (transactional: staging -> validate -> mirror -> atomic swap)
+restore.sh                <- fresh install + config overwrite (--dry-run/--yes/--upgrade-base/
+                             --configs-only/--packages-only/--force-incomplete)
 update_all_ubuntu.sh      <- updates apt/snap/flatpak/npm + inventory apps
-schedule_cron.sh          <- @reboot scheduled backup
+schedule_cron.sh          <- installs a systemd user timer (daily + after boot)
 backups/                  <- output of backup.sh (GIT-IGNORED; contains personal config)
                              (apps/<name>/, services/<unit>/, dotfiles/, user-dirs/<name>/)
                            mirrored to BACKUP_DEST (default /media/vikram-athare/Storage/backup-restore-ubuntu)
@@ -104,50 +134,47 @@ backups/                  <- output of backup.sh (GIT-IGNORED; contains personal
 
 ## 5. Inventory model (`inventory/inventory.yaml`)
 
-The file is plain YAML with four flat lists (plus `user_dirs`) and two structured lists.
-See the file itself for the commented template. The live inventory currently declares
-**24 apps + 1 service** (gcloud, gh, go, uv use install methods corrected to match how
-the user actually installed each tool; `git` is also declared).
+The file is plain YAML with top-level scalars (`default_shell`), flat lists (`groups`,
+`user_dirs`), and structured lists (`apps`, `services`).
 
 ```yaml
-apt_packages:            # installed via: sudo apt-get install -y <item>
+default_shell: /usr/bin/fish   # optional: login shell set via chsh after restore
+groups:                        # optional: Unix groups the user needs
+  - docker
+apt_packages:                  # installed via: sudo apt-get install -y <item>
   - git
-snap_packages:           # suffix ':classic' = classic confinement (e.g. code:classic)
+snap_packages:                 # suffix ':classic' = classic confinement
   - code:classic
-flatpak_apps:            # installed via: flatpak install -y flathub <item>
+flatpak_apps:                  # installed via: flatpak install -y flathub <item>
   - org.gimp.GIMP
-dotfiles:                # copied from/to $HOME (e.g. .bashrc, .gitconfig)
+dotfiles:                      # copied from/to $HOME (e.g. .bashrc, .gitconfig)
   - .bashrc
-user_dirs:               # WHOLE user-data folders captured/restored in full (e.g. Documents)
-  - ~/Documents          # user data, not app config — backed up whole, restored wholesale
+user_dirs:                     # WHOLE user-data folders captured/restored in full
+  - ~/Documents
 
-apps:                    # one entry per MAIN app. Dependencies are per-app, never separate.
+apps:                          # one entry per MAIN app
   - name: opencode
     description: AI coding agent
-    install_type: script            # apt|snap|snap-classic|flatpak|npm-global|pipx|cargo|script|custom
-    install_command: curl -fsSL https://opencode.ai/install | bash   # required for script/custom
-    check_cmd: opencode             # optional: binary to test "already installed"
-    depends_apt:                    # optional: auto-installed before the app (NOT inventory items)
+    install_type: script       # apt|snap|snap-classic|flatpak|npm-global|pipx|cargo|script|custom
+    install_command: curl -fsSL https://opencode.ai/install | bash # required for script/custom
+    check_cmd: opencode        # binary to verify installation
+    depends_apt:               # auto-installed before the app
       - curl
-    config_paths:                   # optional: backed up + restored (overwritten) for this app
+    config_paths:              # backed up + restored (overwritten) for this app
       - ~/.config/opencode
-    exclude:                        # optional: rsync patterns to keep caches / model stores /
-      - CachedData                  # re-downloadable binaries OUT of backups/ (config-only
-      - Cache                       # principle). Applied to every config_path of this app;
-                                    # plain names match at any depth.
-  - name: gcloud                    # package: only for apt/snap/snap-classic/flatpak, when
-    install_type: snap-classic      # the package name differs from the app name (here the
-    package: google-cloud-cli       # snap is google-cloud-cli; also e.g. onlyoffice ->
-    check_cmd: gcloud               # onlyoffice-desktopeditors). The wizard prompts for it
-    config_paths:                   # after you pick the install method.
-      - ~/.config/gcloud
+    exclude:                   # rsync patterns to keep caches/binaries out
+      - CachedData
+    extensions:                # optional: IDs to re-install after restore
+      - some-extension         # VS Code -> code --install-extension
+                               # Azure CLI -> az extension add
+                               # Ollama -> ollama pull
 
-services:                # only CUSTOM services the user installed. Nothing default.
+services:                      # only CUSTOM services the user installed
   - unit: myservice.service
-    target: system                  # system (/etc/systemd/system) or user (~/.config/systemd/user)
+    target: system             # system (/etc/systemd/system) or user (~/.config/systemd/user)
     enable: true
     start: true
-    config_paths:                   # optional: config files the service needs (env file, config dir)
+    config_paths:              # config files the service needs
       - ~/.config/myservice
 ```
 
@@ -159,23 +186,18 @@ Rules for agents editing the inventory:
   `cargo`, `script` (official installer), `custom` (arbitrary command). For `script`/
   `custom`, `install_command` is required.
 - Optional `package` overrides the package name for `apt`/`snap`/`snap-classic`/`flatpak`
-  installs when it differs from the app name (e.g. app `gcloud` installs snap
-  `google-cloud-cli`, app `onlyoffice` installs snap `onlyoffice-desktopeditors`). The
-  wizard prompts for it after the install method is chosen.
-- `config_paths` and `user_dirs` use `~` (tilde) form, not absolute `/home/...` paths,
-  for portability.
-- Optional `exclude` (per app) lists rsync exclude patterns — use it to keep caches,
-  model stores, and re-downloadable binaries out of the backup (e.g. VS Code's
-  `CachedExtensionVSIXs`/`CachedData`, Chrome's `optimization_guide_model_store`,
-  Freebuff's bundled `freebuff/` binary). Excluded items are NOT captured, so they are
-  NOT restored — they must regenerate (or be re-downloaded) after restore. A pattern
-  that needs a space uses a glob (e.g. `Safe*Browsing`).
-- `user_dirs` entries are whole data folders (e.g. `~/Documents`); they are captured and
-  restored wholesale under `backups/user-dirs/` — this is the deliberate data-backup
-  exception to principle 2.
-- A custom service's runtime files (env file, config dir, helper script) belong in that
-  service's `config_paths` (or the relevant app's `config_paths`). They are never
-  auto-inferred from the unit file alone.
+  installs when it differs from the app name. It must ONLY be used with those install types.
+- `config_paths` and `user_dirs` use `~` (tilde) form for portability.
+- `validate_inventory` runs before all destructive operations. It checks unique app names,
+  valid install types, required fields, safe identifiers (no slashes/..), valid service
+  unit names, and path containment.
+- `extensions` lists extension/model IDs (without versions). During the post-install phase
+  of restore, each is installed via the app's native mechanism.
+- `default_shell` is a top-level key (not per-app). The declared shell package must itself
+  be a declared app.
+- `groups` is a top-level list. Each group name is added to the user via `usermod -aG`.
+- A custom service's runtime files belong in that service's `config_paths` (or the relevant
+  app's `config_paths`). They are never auto-inferred from the unit file alone.
 - Do not add dependencies as separate entries (principle 4).
 
 ## 6. Standard workflows
@@ -184,9 +206,10 @@ Rules for agents editing the inventory:
 ```bash
 ./inventory.sh add-app opencode     # wizard; catalog prefills opencode
 ./inventory.sh add-package apt git
-./inventory.sh add-service          # wizard (unit file, target, enable/start, config paths)
-./inventory.sh add-user-dir ~/Documents   # declare a whole user-data folder
+./inventory.sh add-service          # wizard (validates unit name, config paths)
+./inventory.sh add-user-dir ~/Documents
 ./inventory.sh list                 # see everything + installed status
+./inventory.sh validate             # validate schema + semantics (safe, read-only)
 ./inventory.sh review               # suggests apps found on the system, not yet declared
 ./inventory.sh wizard               # guided: scan the system, declare apps one by one
 ```
@@ -195,35 +218,40 @@ Rules for agents editing the inventory:
 ```bash
 ./backup.sh
 ```
-Output goes to `backups/` (git-ignored), then the whole folder is mirrored **without
-filtering** to `BACKUP_DEST` (env-overridable; default
-`/media/vikram-athare/Storage/backup-restore-ubuntu`), keeping only the newest
-`BACKUP_KEEP` (default 5) timestamped snapshots. On a successful run `backup.sh` appends
-a **success marker** (`status: ok` + `finished:` + `mirror:`) to `backups/backup-info.txt`
-— its absence means the run did NOT complete. The newest mirror snapshot carries the same
-file. See the README's "How do I know the last backup succeeded?" for the exact check
-commands. `BACKUP_DEST=` disables the mirror. Never commit `backups/` (see docs/PLAN.md).
+Output goes to `backups/` (git-ignored) via transactional staging, then mirrored to
+`BACKUP_DEST`. The backup manifest (`backup-info.txt`) records per-artifact status and
+overall outcome. A `status: ok` line means ALL declared artifacts were captured. A
+missing or `in_progress` status means the run did not complete.
 
 **Restore** (on a fresh Ubuntu install):
 ```bash
-./restore.sh                 # prompts; adds --yes to skip prompts, --dry-run to preview
-./restore.sh --upgrade-base  # OPT-IN: also apt full-upgrade of the base OS
-./restore.sh --configs-only  # restore config only (skip all installs)
-./restore.sh --packages-only # install fresh only (skip config restore)
+./restore.sh                        # prompts; --yes to skip, --dry-run to preview
+./restore.sh --upgrade-base         # OPT-IN: also apt full-upgrade of the base OS
+./restore.sh --configs-only         # restore config only (skip all installs)
+./restore.sh --packages-only        # install fresh only (skip config + services)
+./restore.sh --force-incomplete     # restore even from an incomplete backup
 ```
-By default restore only touches the items declared in the inventory (principle 4); it
-never upgrades the whole base OS unless `--upgrade-base` is passed.
+Restore validates the backup manifest (requires `status: ok`) before restoring config.
+Under `--packages-only`, services are installed but NOT enabled/started. Restore exits
+nonzero if any required item failed.
 
-Restore semantics: config restore is an **additive overlay** — `rsync -a` copies the
-captured files onto the target and **never deletes** existing target files. A config
-file that no longer exists in the backup is therefore NOT removed from the target
-(history lives in the immutable `BACKUP_DEST` snapshots). This is deliberate: restore
-must never delete data on the target. Services get their `config_paths` restored
-**before** `enable`/`start`, so they boot with real configuration on first start.
+**Post-restore** — groups, default shell, app extensions/models are applied:
+```bash
+# groups (e.g. docker) — user added via usermod -aG
+# default_shell — set via chsh
+# VS Code extensions — installed via code --install-extension
+# Azure CLI extensions — installed via az extension add
+# Ollama models — pulled via ollama pull
+```
 
 **Keep everything current**:
 ```bash
 ./update_all_ubuntu.sh
+```
+
+**Scheduled backup** (systemd user timer):
+```bash
+./schedule_cron.sh   # installs a daily systemd user timer + runs 15min after boot
 ```
 
 ## 7. Conventions for AI agents
@@ -231,26 +259,24 @@ must never delete data on the target. Services get their `config_paths` restored
 - **Shell code**: bash, `set -euo pipefail` at the top of every script, `shellcheck`
   clean. Scripts run on Ubuntu's default bash (4.x) — no bash 5-only features.
 - **Reuse `lib/common.sh`**: logging (`info/ok/warn/err/die`), `confirm`, `require_cmd`,
-  `require_yq`, `yaml_get`, `yaml_list`, `expand_path`, `run` (dry-run aware), status
-  checkers (`is_apt_installed`, `is_snap_installed`, `is_flatpak_installed`). Never
-  duplicate these in new scripts.
+  `require_yq`, `require_non_root`, `require_ubuntu`, `yaml_get`, `yaml_list`,
+  `app_get`, `expand_path`, `normalize_path`, `validate_path_contained`,
+  `validate_inventory`, `manifest_in_progress`, `manifest_final`, `manifest_verify_restorable`,
+  `run` (dry-run aware), status checkers (`is_apt_installed`, `is_snap_installed`,
+  `is_flatpak_installed`, `is_app_installed_by_source`, `is_app_installed`),
+  `with_lock`/`release_lock` (flock).
 - **YAML is read with `yq`** (https://github.com/mikefarah/yq). `require_yq` follows
-  `YQ_AUTO`: fail with install instructions (default), install silently (restore on a fresh
-  system), or ask the user first (inventory.sh/backup.sh). `restore.sh` passes mode 1
-  (silent install) even under `--dry-run`, and the install deliberately bypasses the
-  dry-run `run()` wrapper because the preview must still parse `inventory.yaml`. Write YAML with `yq -i` and
-  `strenv(VAR)`/`load()`/`env()` — never by string-concatenating user input into
-  expressions. Note: the installed yq v4.53.3 does **not** support `--arg`; use
-  `strenv()` (or `env()`) with an inline `VAR=value` prefix instead.
+  `YQ_AUTO`. `app_get` uses `strenv(N)` for the app name (safe) and `$2` directly for the
+  yq query (always a fixed expression like `.install_type`). Write YAML with `yq -i` and
+  `strenv(VAR)`/`load()` — never by string-concatenating user input into expressions.
 - **Never run `restore.sh` or `update_all_ubuntu.sh` on the user's machine without
   explicit permission.** `inventory.sh` only edits the inventory; `backup.sh` only writes
-  to the git-ignored `backups/`. Both are safe. `restore.sh` modifies the system.
+  to git-ignored `backups/`. Both are safe. `restore.sh` modifies the system.
 - **When adding features**: keep `inventory.yaml` backward compatible; update `AGENTS.md`
   (this file), `README.md`, and `docs/PLAN.md` if the schema, principles, or workflow
   change. If you change an exported helper in `lib/common.sh`, update all callers.
 - **Validate before finishing**: `bash -n <script>` on every script, `shellcheck
-  <script>` if installed. Prefer running `./inventory.sh list` and `./backup.sh` (safe)
-  over `restore.sh` (effectful).
+  <script>` if installed. Also run `./inventory.sh validate` to check the inventory.
 
 ## 8. Glossary
 
@@ -260,3 +286,7 @@ must never delete data on the target. Services get their `config_paths` restored
 - **Catalog** — built-in knowledge in `lib/catalog.sh` used by `inventory.sh add-app`.
 - **Custom service** — a systemd unit the user installed themselves; only these are ever
   declared in the inventory.
+- **Manifest** — `backup-info.txt` written by `backup.sh` on completion with artifact
+  status, inventory SHA-256, and overall `status: ok`/`in_progress` marker.
+- **Transactional backup** — build in staging, validate, mirror, atomically swap to live.
+  The current `backups/` is never the target of an in-progress rebuild.

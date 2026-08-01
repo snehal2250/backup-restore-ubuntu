@@ -5,14 +5,6 @@
 # Philosophy (see AGENTS.md): install everything FRESH from recommended sources
 # at the latest stable version; copy back ONLY configuration from backups/.
 # Never installs from backup files, never replays dpkg state, never pins versions.
-#
-# Usage:
-#   ./restore.sh                 # prompts before modifying the system
-#   ./restore.sh --yes           # skip prompts
-#   ./restore.sh --dry-run       # preview; only yq auto-installs if missing
-#   ./restore.sh --upgrade-base  # ALSO apt full-upgrade the base OS (opt-in)
-#   ./restore.sh --configs-only  # restore config only (skip all installs)
-#   ./restore.sh --packages-only # install fresh only (skip config restore)
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -20,9 +12,10 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
 DRY_RUN=0
 ASSUME_YES=0
-DO_UPGRADE=0   # base OS upgrade is opt-in: only declared items are touched by default
-CONFIGS_ONLY=0  # skip installs — only restore config from backups/
-PACKAGES_ONLY=0 # skip config restore — only install fresh
+DO_UPGRADE=0
+CONFIGS_ONLY=0
+PACKAGES_ONLY=0
+FORCE_INCOMPLETE=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -31,39 +24,44 @@ while [ $# -gt 0 ]; do
     --upgrade-base) DO_UPGRADE=1 ;;
     --configs-only) CONFIGS_ONLY=1 ;;
     --packages-only) PACKAGES_ONLY=1 ;;
-    *) die "Unknown option: $1 (usage: $0 [--dry-run] [--yes] [--upgrade-base] [--configs-only|--packages-only])" ;;
+    --force-incomplete) FORCE_INCOMPLETE=1 ;;
+    *) die "Unknown option: $1 (usage: $0 [--dry-run] [--yes] [--upgrade-base] [--configs-only|--packages-only] [--force-incomplete])" ;;
   esac
   shift
 done
 
-# --configs-only and --packages-only are mutually exclusive.
 [ "$CONFIGS_ONLY" = "1" ] && [ "$PACKAGES_ONLY" = "1" ] && die "--configs-only and --packages-only are mutually exclusive."
 
 [ -f "$INVENTORY_FILE" ] || die "Inventory file not found: $INVENTORY_FILE"
-# yq is required to READ the inventory, so auto-install it even under --dry-run
-# (a preview still has to parse inventory.yaml; require_yq executes the install
-# directly, outside the run() dry-run wrapper, see lib/common.sh).
 require_yq 1
+
+# --- Preflight: OS and user ----------------------------------------------
+require_ubuntu
+require_non_root
 require_cmd sudo
 
-# --- Preflight ------------------------------------------------------------
-if [ -r /etc/os-release ]; then
-  # shellcheck disable=SC1091
-  . /etc/os-release
-  [ "${ID:-}" = "ubuntu" ] || warn "This repo targets Ubuntu; detected: ${ID:-unknown} ${VERSION_ID:-}"
-else
-  warn "Cannot determine the OS (/etc/os-release missing)."
+# Validate inventory before touching anything.
+validate_inventory || die "Inventory validation failed — fix inventory.yaml and re-run."
+
+# --- Determine backup status ---------------------------------------------
+BACKUPS_PRESENT=0
+BACKUPS_VERIFIED=0
+if [ -f "$BACKUP_MANIFEST" ]; then
+  BACKUPS_PRESENT=1
+  if manifest_verify_restorable "$BACKUP_MANIFEST"; then
+    BACKUPS_VERIFIED=1
+  elif [ "$FORCE_INCOMPLETE" = "1" ]; then
+    warn "Backup manifest is incomplete but --force-incomplete was specified — proceeding anyway."
+    BACKUPS_VERIFIED=1
+  fi
+elif [ -d "$BACKUPS_DIR" ] && [ -n "$(find "$BACKUPS_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+  warn "backups/ contains data but no valid manifest (backup-info.txt with status: ok)."
+  if [ "$FORCE_INCOMPLETE" = "1" ]; then
+    BACKUPS_PRESENT=1
+    BACKUPS_VERIFIED=1
+  fi
 fi
 
-# backups/ counts as present only if it holds a real artifact (backup-info.txt written
-# by backup.sh, or at least one captured file). An EMPTY dir — e.g. after a failed
-# snapshot copy on a fresh machine — must not silently suppress the warning below.
-BACKUPS_PRESENT=0
-if [ -f "$BACKUPS_DIR/backup-info.txt" ]; then
-  BACKUPS_PRESENT=1
-elif [ -d "$BACKUPS_DIR" ] && [ -n "$(find "$BACKUPS_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]; then
-  BACKUPS_PRESENT=1
-fi
 if [ "$BACKUPS_PRESENT" = "0" ]; then
   if [ "$CONFIGS_ONLY" = "1" ]; then
     warn "No backups/ found — --configs-only has nothing to restore."
@@ -72,22 +70,51 @@ if [ "$BACKUPS_PRESENT" = "0" ]; then
   fi
 fi
 
-if [ "$DRY_RUN" = "0" ] && [ "$ASSUME_YES" = "0" ] && [ "$CONFIGS_ONLY" = "0" ]; then
+if [ "$BACKUPS_PRESENT" = "1" ] && [ "$BACKUPS_VERIFIED" = "0" ]; then
+  if [ "$CONFIGS_ONLY" = "1" ]; then
+    die "Cannot restore config: backup manifest is not valid (missing or no 'status: ok'). Use --force-incomplete to override."
+  elif [ "$PACKAGES_ONLY" != "1" ]; then
+    warn "Backup manifest is not valid — configuration will NOT be restored. Use --force-incomplete to override."
+  fi
+fi
+
+# --- Confirm -------------------------------------------------------------
+if [ "$DRY_RUN" = "0" ] && [ "$ASSUME_YES" = "0" ] && [ "$CONFIGS_ONLY" = "0" ] && [ "$PACKAGES_ONLY" = "0" ]; then
   confirm "This will install packages and modify the system. Continue?" "n" || die "Aborted."
 elif [ "$CONFIGS_ONLY" = "1" ] && [ "$DRY_RUN" = "0" ] && [ "$ASSUME_YES" = "0" ]; then
   confirm "This will restore configuration from backups/ (no packages will be installed). Continue?" "n" || die "Aborted."
+elif [ "$PACKAGES_ONLY" = "1" ] && [ "$DRY_RUN" = "0" ] && [ "$ASSUME_YES" = "0" ]; then
+  confirm "This will install packages only (no configuration will be restored). Continue?" "n" || die "Aborted."
 fi
+
+# --- Check required tools -------------------------------------------------
+# rsync is needed for config restore; ensure it's available.
+if [ "$PACKAGES_ONLY" != "1" ] && [ "$BACKUPS_PRESENT" = "1" ]; then
+  if ! command -v rsync >/dev/null 2>&1; then
+    info "rsync not found — installing it (needed for config restore)."
+    run sudo apt-get update
+    run sudo apt-get install -y rsync
+  fi
+fi
+
+# --- Accumulated exit code ------------------------------------------------
+ACUMULATED_EXIT=0
+
+mark_failure() {
+  local code="${1:-$EXIT_INSTALL_FAILED}"
+  ACUMULATED_EXIT=$(( ACUMULATED_EXIT | code ))
+}
 
 # --- Phase 1: base system -------------------------------------------------
 if [ "$CONFIGS_ONLY" = "1" ]; then
   info "Phase 1/5: base system (skipped — --configs-only)"
 else
   info "Phase 1/5: base system"
-  run sudo apt-get update
+  run sudo apt-get update || mark_failure "$EXIT_PREREQ_FAILED"
   if [ "$DO_UPGRADE" = "1" ]; then
     info "(--upgrade-base: apt full-upgrade of the whole base OS)"
-    run sudo apt-get full-upgrade -y
-    run sudo apt-get autoremove -y
+    run sudo apt-get full-upgrade -y || mark_failure "$EXIT_PREREQ_FAILED"
+    run sudo apt-get autoremove -y || true
   else
     info "(base OS full-upgrade skipped by default — opt in with --upgrade-base)"
   fi
@@ -106,7 +133,7 @@ install_apt_packages() {
   done < <(yaml_list '.apt_packages[]')
   if [ "${#pkgs[@]}" -gt 0 ]; then
     info "Installing ${#pkgs[@]} apt package(s): ${pkgs[*]}"
-    run sudo apt-get install -y "${pkgs[@]}"
+    run sudo apt-get install -y "${pkgs[@]}" || mark_failure
   fi
 }
 
@@ -118,6 +145,7 @@ install_snap_packages() {
   if [ "${#pkgs[@]}" -gt 0 ]; then
     if ! command -v snap >/dev/null 2>&1; then
       warn "snap is not available on this system; skipping snap packages."
+      mark_failure
       return 0
     fi
     for entry in "${pkgs[@]}"; do
@@ -125,7 +153,7 @@ install_snap_packages() {
       classic=""
       [ "${entry##*:}" = "classic" ] && classic="--classic"
       info "Installing snap: $entry"
-      run sudo snap install $classic "$pkg"
+      run sudo snap install $classic "$pkg" || mark_failure
     done
   fi
 }
@@ -138,12 +166,12 @@ install_flatpak_apps() {
   if [ "${#apps[@]}" -gt 0 ]; then
     command -v flatpak >/dev/null 2>&1 || {
       info "flatpak not found — installing it."
-      run sudo apt-get install -y flatpak
+      run sudo apt-get install -y flatpak || mark_failure
     }
-    run flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+    run flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo || true
     for a in "${apps[@]}"; do
       info "Installing flatpak app: $a"
-      run flatpak install -y flathub "$a"
+      run flatpak install -y flathub "$a" || mark_failure
     done
   fi
 }
@@ -153,13 +181,13 @@ install_snap_packages
 install_flatpak_apps
 fi
 
-# --- Phase 3: apps (fresh install + config overwrite) ----------------------
+# --- Phase 3: apps --------------------------------------------------------
 info "Phase 3/5: apps"
 
 restore_app_config() {
   local name="$1"
   local dir="$BACKUPS_DIR/apps/$name"
-  [ "$BACKUPS_PRESENT" = "1" ] || return 0
+  [ "$BACKUPS_VERIFIED" = "1" ] || return 0
   if [ -d "$dir/home" ]; then
     run rsync -a "$dir/home/" "$HOME/"
     ok "  $name: config restored to \$HOME"
@@ -170,68 +198,131 @@ restore_app_config() {
   fi
 }
 
+# Bootstrap backends derived from inventory, before any app install.
+bootstrap_backends() {
+  local need_flatpak=0 need_npm=0 need_pipx=0 need_cargo=0
+  local itype
+  while IFS= read -r itype; do
+    [ -n "$itype" ] || continue
+    case "$itype" in
+      flatpak) need_flatpak=1 ;;
+      npm-global) need_npm=1 ;;
+      pipx) need_pipx=1 ;;
+      cargo) need_cargo=1 ;;
+    esac
+  done < <(yq -r '.apps[].install_type | select(. != null)' "$INVENTORY_FILE")
+
+  if [ "$need_flatpak" = "1" ] && ! command -v flatpak >/dev/null 2>&1; then
+    info "flatpak needed by declared apps — installing it."
+    run sudo apt-get install -y flatpak || mark_failure
+  fi
+  local flatpak_count
+  flatpak_count="$(yq -r '.flatpak_apps | length // 0' "$INVENTORY_FILE" 2>/dev/null || echo 0)"
+  if [ "$need_flatpak" = "1" ] || [ "${flatpak_count:-0}" -gt 0 ]; then
+    run flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo 2>/dev/null || true
+  fi
+  if [ "$need_npm" = "1" ] && ! command -v npm >/dev/null 2>&1; then
+    info "npm needed by declared apps but not installed — individual npm-global installs will fail unless nodejs+npm are declared as deps."
+  fi
+  if [ "$need_pipx" = "1" ] && ! command -v pipx >/dev/null 2>&1; then
+    info "pipx needed by declared apps — installing it."
+    run sudo apt-get install -y pipx || mark_failure
+  fi
+  if [ "$need_cargo" = "1" ] && ! command -v cargo >/dev/null 2>&1; then
+    info "cargo needed by declared apps — installing it."
+    run sudo apt-get install -y cargo || mark_failure
+  fi
+}
+
 install_app() {
   local name="$1" itype icmd check pkg
   itype="$(app_get "$name" '.install_type')"
-  [ -n "$itype" ] || { warn "  app '$name' has no install_type — skipping."; return 0; }
+  [ -n "$itype" ] || { warn "  app '$name' has no install_type — skipping."; mark_failure; return 1; }
   icmd="$(app_get "$name" '.install_command')"
   check="$(app_get "$name" '.check_cmd')"
   pkg="$(app_get "$name" '.package')"
   [ -n "$pkg" ] || pkg="$name"
 
-  # --configs-only: skip ALL installs, restore config only.
   if [ "$CONFIGS_ONLY" = "1" ]; then
-    if [ "$BACKUPS_PRESENT" = "1" ]; then
+    if [ "$BACKUPS_VERIFIED" = "1" ]; then
       restore_app_config "$name"
     fi
     return 0
   fi
 
-  # Dependencies are auto-installed with the app; they are never separate
-  # inventory items (AGENTS.md principle 4).
   local -a deps=() d
   while IFS= read -r d; do
     [ -n "$d" ] && deps+=("$d")
-  done < <(yq -r ".apps[] | select(.name == \"$name\") | .depends_apt[]?" "$INVENTORY_FILE")
+  done < <(app_get "$name" '.depends_apt[]?')
   if [ "${#deps[@]}" -gt 0 ]; then
     info "  $name: installing dependencies: ${deps[*]}"
-    run sudo apt-get install -y "${deps[@]}"
+    run sudo apt-get install -y "${deps[@]}" || { warn "  $name: dependency install failed"; mark_failure; }
   fi
 
-  # script/custom installers have no package manager to make them idempotent —
-  # without a check_cmd every re-run re-executes the installer. Warn loudly.
   if { [ "$itype" = "script" ] || [ "$itype" = "custom" ]; } && [ -z "$check" ]; then
     warn "  $name: script/custom installer with NO check_cmd — re-runs will re-run the installer (add check_cmd in the inventory)."
   fi
 
-  if [ -n "$check" ] && command -v "$check" >/dev/null 2>&1; then
-    ok "  $name: already installed (found '$check')"
+  # Source-specific check: don't skip just on command -v.
+  if is_app_installed_by_source "$name"; then
+    ok "  $name: already installed (verified via $itype)"
   else
+    local install_ok=1
     case "$itype" in
-      apt)          run sudo apt-get install -y "$pkg" ;;
-      snap)         run sudo snap install "$pkg" ;;
-      snap-classic) run sudo snap install --classic "$pkg" ;;
-      flatpak)      run flatpak install -y flathub "$pkg" ;;
-      npm-global)   run sudo npm install -g "$name"@latest ;;
-      pipx)         run pipx install "$name" ;;
-      cargo)        run cargo install "$name" ;;
+      apt)
+        run sudo apt-get install -y "$pkg" || install_ok=0 ;;
+      snap)
+        if command -v snap >/dev/null 2>&1; then
+          run sudo snap install "$pkg" || install_ok=0
+        else
+          warn "  $name: snap not available — cannot install."
+          install_ok=0
+        fi ;;
+      snap-classic)
+        if command -v snap >/dev/null 2>&1; then
+          run sudo snap install --classic "$pkg" || install_ok=0
+        else
+          warn "  $name: snap not available — cannot install."
+          install_ok=0
+        fi ;;
+      flatpak)
+        run flatpak install -y flathub "$pkg" || install_ok=0 ;;
+      npm-global)
+        run sudo npm install -g "$pkg"@latest || install_ok=0 ;;
+      pipx)
+        run pipx install "$pkg" || install_ok=0 ;;
+      cargo)
+        run cargo install "$pkg" || install_ok=0 ;;
       script|custom)
-        [ -n "$icmd" ] || die "  app '$name' uses install_type '$itype' but has no install_command."
+        [ -n "$icmd" ] || { warn "  app '$name' uses install_type '$itype' but has no install_command."; mark_failure; return 1; }
         if [ "$DRY_RUN" = "1" ]; then
           printf '[dry-run] install %s: %s\n' "$name" "$icmd"
         else
           info "  $name: running official installer..."
-          bash -c "$icmd" || warn "  install command for '$name' failed (exit $?)."
+          bash -o pipefail -c "$icmd" || { warn "  install command for '$name' failed (exit $?)."; install_ok=0; }
         fi
         ;;
-      *) warn "  app '$name': unknown install_type '$itype' — skipping." ;;
+      *) warn "  app '$name': unknown install_type '$itype' — skipping."; mark_failure; return 1 ;;
     esac
+
+    if [ "$install_ok" = "0" ]; then
+      mark_failure
+    elif [ -n "$check" ] && ! command -v "$check" >/dev/null 2>&1; then
+      warn "  $name: installer succeeded but '$check' not found — may need a new shell or PATH update."
+    else
+      ok "  $name: installed."
+    fi
   fi
 
   if [ "$PACKAGES_ONLY" != "1" ]; then
     restore_app_config "$name"
   fi
 }
+
+# Bootstrap backends before starting app installs.
+if [ "$CONFIGS_ONLY" != "1" ]; then
+  bootstrap_backends
+fi
 
 while IFS= read -r name; do
   [ -n "$name" ] || continue
@@ -250,16 +341,13 @@ restore_services() {
     [ "$enable" = "true" ] || enable="false"
     [ "$start" = "true" ] || start="false"
     sdir="$BACKUPS_DIR/services/$unit"
-    if [ "$BACKUPS_PRESENT" = "1" ] && [ -f "$sdir/unit" ]; then
-      # Order matters (AGENTS.md principle): install the unit + reload, then
-      # restore the service's CONFIG BEFORE enabling/starting it, so the
-      # service boots with its real configuration on first start.
+    if [ "$BACKUPS_VERIFIED" = "1" ] && [ -f "$sdir/unit" ]; then
       if [ "$CONFIGS_ONLY" = "0" ]; then
         if [ "$target" = "user" ]; then
           dest="$HOME/.config/systemd/user/$unit"
           run mkdir -p "$HOME/.config/systemd/user"
           run cp "$sdir/unit" "$dest"
-          run systemctl --user daemon-reload
+          run systemctl --user daemon-reload 2>/dev/null || warn "  $unit: could not reload user systemd (no user session?)."
         else
           dest="/etc/systemd/system/$unit"
           run sudo cp "$sdir/unit" "$dest"
@@ -277,10 +365,18 @@ restore_services() {
           ok "  $unit: config restored to /"
         fi
       fi
-      if [ "$CONFIGS_ONLY" = "0" ]; then
+      # Under --packages-only, do NOT enable/start services — they need
+      # their configuration to have been restored first.
+      if [ "$PACKAGES_ONLY" = "1" ]; then
+        if [ "$DRY_RUN" = "1" ]; then
+          printf '[dry-run] %s: NOT enabling/starting (--packages-only skips config — re-run without --packages-only to activate).\n' "$unit"
+        else
+          warn "  $unit: NOT enabled/started (--packages-only skips config — re-run without --packages-only to activate)."
+        fi
+      elif [ "$CONFIGS_ONLY" = "0" ]; then
         if [ "$target" = "user" ]; then
-          [ "$enable" = "true" ] && run systemctl --user enable "$unit"
-          [ "$start" = "true" ] && run systemctl --user start "$unit"
+          [ "$enable" = "true" ] && run systemctl --user enable "$unit" 2>/dev/null || warn "  $unit: could not enable (no user session?)."
+          [ "$start" = "true" ] && run systemctl --user start "$unit" 2>/dev/null || warn "  $unit: could not start (no user session?)."
         else
           [ "$enable" = "true" ] && run sudo systemctl enable "$unit"
           [ "$start" = "true" ] && run sudo systemctl start "$unit"
@@ -289,6 +385,9 @@ restore_services() {
       ok "  service: $unit ($target)"
     else
       warn "  service '$unit': no unit file in backups/ — skipping."
+      if [ "$BACKUPS_VERIFIED" = "1" ]; then
+        mark_failure
+      fi
     fi
   done < <(yq -r '.services[] | [.unit, (.target // "system"), (.enable // false | tostring), (.start // false | tostring)] | @tsv' "$INVENTORY_FILE")
 }
@@ -305,7 +404,10 @@ restore_dotfiles() {
   local df
   while IFS= read -r df; do
     [ -n "$df" ] || continue
-    if [ "$BACKUPS_PRESENT" = "1" ] && [ -f "$BACKUPS_DIR/dotfiles/$df" ]; then
+    if [ "$BACKUPS_VERIFIED" = "1" ] && [ -f "$BACKUPS_DIR/dotfiles/$df" ]; then
+      local dest_parent
+      dest_parent="$(dirname "$HOME/$df")"
+      run mkdir -p "$dest_parent"
       run cp "$BACKUPS_DIR/dotfiles/$df" "$HOME/$df"
       ok "  dotfile: $df"
     else
@@ -316,13 +418,12 @@ restore_dotfiles() {
 
 restore_dotfiles
 
-# Whole user-data folders declared as user_dirs (e.g. ~/Documents).
 restore_user_dirs() {
   local d rel src
   while IFS= read -r d; do
     [ -n "$d" ] || continue
-    if [ "$BACKUPS_PRESENT" != "1" ]; then
-      warn "  user dir '$d': no backups — skipping."
+    if [ "$BACKUPS_VERIFIED" != "1" ]; then
+      warn "  user dir '$d': no verified backups — skipping."
       continue
     fi
     src="$(expand_path "$d")"
@@ -330,10 +431,10 @@ restore_user_dirs() {
       warn "  user dir '$d': \$HOME itself cannot be restored this way — skipping."
       continue
     fi
-    case "$src" in
-      "$HOME"/*) : ;;
-      *) warn "  user dir '$d': not under \$HOME — skipping." ; continue ;;
-    esac
+    if ! validate_path_contained "$d" "$HOME" 2>/dev/null; then
+      warn "  user dir '$d': not under \$HOME — skipping."
+      continue
+    fi
     rel="${src#"$HOME"/}"
     if [ -d "$BACKUPS_DIR/user-dirs/$rel" ]; then
       run mkdir -p "$HOME/$rel"
@@ -348,15 +449,102 @@ restore_user_dirs() {
 restore_user_dirs
 fi
 
+# --- Phase 6: post-install (groups, shell, extensions, models) ------------
+if [ "$CONFIGS_ONLY" = "1" ]; then
+  info "Phase 6/6: post-install (skipped — --configs-only)"
+elif [ "$PACKAGES_ONLY" = "1" ]; then
+  info "Phase 6/6: post-install (skipped — --packages-only)"
+else
+info "Phase 6/6: post-install (groups, shell, extensions)"
+
+# --- Groups ---
+while IFS= read -r g; do
+  [ -n "$g" ] || continue
+  if getent group "$g" >/dev/null 2>&1; then
+    if groups "$USER" 2>/dev/null | grep -qw "$g"; then
+      ok "  group: $g already member"
+    else
+      run sudo usermod -aG "$g" "$USER"
+      ok "  group: $g — user '$USER' added (log out and back in to take effect)"
+    fi
+  else
+    warn "  group '$g' does not exist — skipping."
+  fi
+done < <(yaml_list '.groups[]?')
+
+# --- Default shell ---
+_shell_target="$(yaml_get '.default_shell')"
+if [ -n "$_shell_target" ]; then
+  if [ -x "$_shell_target" ]; then
+    if grep -q "^$USER:.*:$_shell_target\$" /etc/passwd 2>/dev/null; then
+      ok "  default shell: already $_shell_target"
+    else
+      run sudo chsh -s "$_shell_target" "$USER"
+      ok "  default shell: set to $_shell_target (takes effect on next login)"
+    fi
+  else
+    warn "  default shell '$_shell_target' is not executable — skipping chsh."
+  fi
+fi
+
+# --- App extensions (VS Code, Azure CLI, Ollama models) ---
+while IFS= read -r name; do
+  [ -n "$name" ] || continue
+  exts=()
+  while IFS= read -r e; do
+    [ -n "$e" ] && exts+=("$e")
+  done < <(app_get "$name" '.extensions[]?')
+  [ "${#exts[@]}" -gt 0 ] || continue
+
+  check="$(app_get "$name" '.check_cmd')"
+  [ -n "$check" ] && command -v "$check" >/dev/null 2>&1 || { warn "  $name: app not installed — cannot install extensions."; continue; }
+
+  for e in "${exts[@]}"; do
+    case "$name" in
+      code|vscode)
+        run code --install-extension "$e" && ok "  $name: extension '$e' installed" || warn "  $name: failed to install extension '$e'"
+        ;;
+      az)
+        run az extension add -n "$e" 2>/dev/null && ok "  $name: extension '$e' added" || warn "  $name: failed to add extension '$e'"
+        ;;
+      ollama)
+        run ollama pull "$e" && ok "  $name: model '$e' pulled" || warn "  $name: failed to pull model '$e'"
+        ;;
+      *)
+        warn "  $name: extensions not supported for this app type"
+        ;;
+    esac
+  done
+done < <(yaml_list '.apps[] | .name')
+fi
+
 # --- Wrap-up ---------------------------------------------------------------
 echo
-ok "Restore complete."
+if [ "$ACUMULATED_EXIT" -ne 0 ]; then
+  warn "Restore completed with issues (exit code: $ACUMULATED_EXIT)."
+  echo
+  echo "  Review the output above for warnings and failed items."
+  _fail_reasons=""
+  [ "$(( ACUMULATED_EXIT & EXIT_INSTALL_FAILED ))" -ne 0 ] && _fail_reasons="$_fail_reasons  - One or more package/app installs failed (check above)."
+  [ "$(( ACUMULATED_EXIT & EXIT_CONFIGS_MISSING ))" -ne 0 ] && _fail_reasons="$_fail_reasons  - Some configuration or artifacts were missing."
+  [ "$(( ACUMULATED_EXIT & EXIT_PREREQ_FAILED ))" -ne 0 ] && _fail_reasons="$_fail_reasons  - A prerequisite setup step failed."
+  [ -n "$_fail_reasons" ] && echo "$_fail_reasons"
+else
+  ok "Restore complete."
+fi
 if [ "$DRY_RUN" = "1" ]; then
-  echo "(dry run — nothing else was executed; yq may have been auto-installed to read the inventory)"
-  exit 0
+  echo "(dry run — nothing was executed except yq install if needed to read the inventory)"
+fi
+if [ "$PACKAGES_ONLY" = "1" ] && [ "$BACKUPS_VERIFIED" = "1" ]; then
+  echo
+  echo "NOTE: --packages-only was used. Services were installed but NOT enabled/started."
+  echo "Re-run without --packages-only to restore config and activate services."
 fi
 echo
 echo "Next steps:"
-echo "  1. Review the output above for warnings."
+echo "  1. Review the output above for warnings and failed items."
 echo "  2. Reboot so services and configuration take full effect."
 echo "  3. Keep everything current with ./update_all_ubuntu.sh"
+echo "  4. Verify key apps and services work before relying on this machine."
+
+exit "$ACUMULATED_EXIT"
