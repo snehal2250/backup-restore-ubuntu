@@ -97,6 +97,10 @@ if [ "${#APPS_ONLY[@]}" -gt 0 ] || [ "${#APPS_SKIP[@]}" -gt 0 ]; then
     warn "--only/--skip app names given, but the apps phase is disabled by phase gating — no apps will be processed."
   fi
 fi
+# Warn when the resumability flags contradict the legacy modes (e.g.
+# --packages-only --only dotfiles would silently skip the only phase the user
+# asked for).
+check_phase_conflicts
 
 # --- Optional external backup source (--source) ---------------------------
 # With --source, restore reads configuration DIRECTLY from the given backup
@@ -126,7 +130,7 @@ if [ -n "$RESTORE_SOURCE" ]; then
     warn "Backup manifest is incomplete but --force-incomplete was specified — proceeding anyway."
     BACKUPS_VERIFIED=1
   else
-    die "Cannot restore from $RESTORE_SOURCE: backup manifest is not verified (missing or no 'status: ok'). Use --force-incomplete to override."
+    die "Cannot restore from $RESTORE_SOURCE: backup manifest is not verified (missing or no restorable status: 'ok'/'ok_with_warnings'). Use --force-incomplete to override."
   fi
 
   # Preflight compatibility checks (best-effort; older manifests may lack lines).
@@ -170,7 +174,7 @@ if [ -z "$RESTORE_SOURCE" ]; then
       BACKUPS_VERIFIED=1
     fi
   elif [ -d "$BACKUPS_DIR" ] && [ -n "$(find "$BACKUPS_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]; then
-    warn "backups/ contains data but no valid manifest (backup-info.txt with status: ok)."
+    warn "backups/ contains data but no valid manifest (backup-info.txt with a restorable status: ok/ok_with_warnings)."
     if [ "$FORCE_INCOMPLETE" = "1" ]; then
       BACKUPS_PRESENT=1
       BACKUPS_VERIFIED=1
@@ -187,7 +191,7 @@ if [ -z "$RESTORE_SOURCE" ]; then
 
   if [ "$BACKUPS_PRESENT" = "1" ] && [ "$BACKUPS_VERIFIED" = "0" ]; then
     if [ "$CONFIGS_ONLY" = "1" ]; then
-      die "Cannot restore config: backup manifest is not valid (missing or no 'status: ok'). Use --force-incomplete to override."
+      die "Cannot restore config: backup manifest is not valid (missing or no restorable status: 'ok'/'ok_with_warnings'). Use --force-incomplete to override."
     elif [ "$PACKAGES_ONLY" != "1" ]; then
       warn "Backup manifest is not valid — configuration will NOT be restored. Use --force-incomplete to override."
     fi

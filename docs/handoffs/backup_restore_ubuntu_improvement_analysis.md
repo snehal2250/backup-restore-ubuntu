@@ -41,7 +41,7 @@ The highest-priority issue is that the current backup flow can overwrite the pre
 | P1 — Separate config/state/data/cache/secrets | 🚧 | `config_paths` vs `user_dirs` split + per-app `exclude:` lists cover config / user-data / cache in practice | **Per-path `class:` model + pre-backup secret scanner.** Resume: `inventory/schema.yaml` (class enum), `backup.sh` capture loop, `lib/common.sh` validation, tests |
 | P1 — Restore conflict policies | ✅ | schema v3 `conflict_policy` (merge/replace/skip-existing/prompt), rollback bundle + restore journal, dry-run creates nothing | — (three-way merge: not-required) |
 | P1 — Explicit phases + resumability | ✅ | `--plan` / `--from-phase` / `--only` / `--skip` / `--non-interactive`; durable phase journal (`phase-start`/`phase-done`); gating unit-tested | — |
-| P1 — Backup completeness semantics | 🚧 | per-artifact `captured/missing/incomplete/empty`, overall `ok/degraded`, `status: ok` gate + `--force-incomplete` | **Per-item `required:` / `on_missing:` + `ok_with_warnings`/`failed` granularity.** Resume: `record_artifact` (backup.sh), `manifest_final`/`manifest_verify_restorable` (lib/common.sh), restore gating, schema v4, tests |
+| P1 — Backup completeness semantics | ✅ | **Schema v4 `required:`/`on_missing:` on apps+services; `failed` artifacts; statuses `ok`/`ok_with_warnings`/`degraded`/`failed` with exact warning/failure counts; restore accepts `ok_with_warnings`, refuses `failed`, `degraded` needs `--force-incomplete`; `publish_backup` accepts `ok_with_warnings`; 36-assertion sandboxed `backup.sh` integration test; truthful end-of-run summary (`PUBLISH_RESULT`: a rollback is never reported as success); override sandboxing (exported `REPO_ROOT` must be `.test-tmp.*`, destructive paths containment-checked under it)** | — (restore-side per-artifact skip/report UI: not-required) |
 | P1 — Content integrity (SHA256SUMS) | ✅ | deterministic checksums on backup; restore verifies checksums, rejects hostile files + escaping symlinks, warns on extras; legacy snapshots warn | — (manifest/checksum signing: not-required) |
 | P2 — Portability | 🚧 | `SUPPORTED_ARCHS`/`SUPPORTED_UBUNTU_RELEASES` gate, `ARCH_NORM`, manifest arch/os records checked by `--source` preflight | **Per-entry compat constraints + config-format migration hooks.** Resume: `inventory/schema.yaml` (per-app arch/release gates), `lib/catalog.sh` (Chrome AMD64 gate), `lib/installers.sh`, tests |
 | P2 — Avoid backing up auth blindly | ⬜ | `exclude:` lists keep some token dirs out; docs post-restore checklist (RESTORE.md §5) | **`include:` lists + `secret` class + encrypted-secret workflow.** Resume: schema (shared with the classification item), `backup.sh`, docs |
@@ -57,6 +57,7 @@ The highest-priority issue is that the current backup flow can overwrite the pre
 4. P1 — conflict policies + rollback bundle + restore journal, schema v3 (`3659fd8`).
 5. P2 — automated test suite (`tests/`, 7 files / 202 assertions) — **uncommitted**.
 6. P1 — resumable-phase flags + durable phase journal — **uncommitted**.
+7. P1 — backup completeness semantics (schema v4: `required:`/`on_missing:`, `ok_with_warnings`/`failed` granularity, restore gating, truthful rollback summary, override sandboxing) + test_backup_completeness.sh (8 test files / 292 assertions) — **uncommitted**.
 
 ### P0 — Preserve the previous known-good manifest — ✅ completed
 
@@ -268,7 +269,7 @@ Avoid broad `rsync --delete` behavior for home-directory content unless a path e
 
 ### P1 — Introduce explicit restore phases and resumability — ✅ completed (2026-08-02)
 
-**Status:** ✅ completed (2026-08-02) — `--plan` (phase-by-phase preview + dry-run detail), `--from-phase <phase>`, `--only`/`--skip <phases,apps>`, and `--non-interactive` are implemented in restore.sh. Phase names gate whole phases; app names filter the apps phase (so the handoff's `--only code,docker` example works), and `user-data` is accepted as an alias for the dotfiles phase. Unknown names in `--only`/`--skip` die (typo guard). The rollback bundle + journal are now created **up front** on real (non-dry-run) runs, and every enabled phase writes `phase-start`/`phase-done` markers to `restore-journal.log` — the durable phase journal. Gating lives in `lib/common.sh` (`phase_enabled`/`app_selected`/`phase_canonical`) and is unit-tested in `tests/test_phases.sh` (76 assertions).
+**Status:** ✅ completed (2026-08-02) — `--plan` (phase-by-phase preview + dry-run detail), `--from-phase <phase>`, `--only`/`--skip <phases,apps>`, and `--non-interactive` are implemented in restore.sh. Phase names gate whole phases; app names filter the apps phase (so the handoff's `--only code,docker` example works), and `user-data` is accepted as an alias for the dotfiles phase. Unknown names in `--only`/`--skip` die (typo guard). The rollback bundle + journal are now created **up front** on real (non-dry-run) runs, and every enabled phase writes `phase-start`/`phase-done` markers to `restore-journal.log` — the durable phase journal. Gating lives in `lib/common.sh` (`phase_enabled`/`app_selected`/`phase_canonical`) and is unit-tested in `tests/test_phases.sh` (104 assertions, incl. the `--from-phase` + later-`--only` non-conflict cases).
 
 Note: the flags map onto the EXISTING six phases (base/packages/apps/services/dotfiles/postinstall) rather than the aspirational 11-phase model sketched below — the finer split (preflight, package repositories, verification, …) would fragment the journal and add no behavioral value for a personal tool; the six-phase model is documented in docs/RESTORE.md.
 
@@ -298,11 +299,9 @@ Write a restore journal outside the backup source. Each phase should be restarta
 
 Package installation failures should not silently disappear. Continue where safe, but return non-zero when required items fail.
 
-### P1 — Improve backup completeness semantics — 🚧 in-progress
+### P1 — Improve backup completeness semantics — ✅ completed
 
-**Status:** 🚧 in-progress — per-artifact `captured`/`missing`/`incomplete`/`empty`, overall `ok`/`degraded`, and restore's `status: ok` requirement (with `--force-incomplete` override) are in place. Not implemented: per-item `required: true` / `on_missing:` policy and the finer `ok_with_warnings` / `failed` status granularity.
-
-**Resume here:** (1) schema v4: optional per-app `required: true` and `on_missing: fail|warn`; (2) `record_artifact` in `backup.sh` distinguishes `missing` (required) from `missing-optional`; (3) `manifest_final` in `lib/common.sh` derives `ok_with_warnings`/`failed` from the artifact counts; (4) `manifest_verify_restorable` accepts `ok_with_warnings`, requires `--force-incomplete` for `degraded`, rejects `failed`; (5) extend `tests/test_manifest.sh`.
+**Status:** ✅ completed (2026-08-02) — schema v4 adds optional `required: true` and `on_missing: warn|fail` to `apps[]`/`services[]` (backward compatible; absent = historical behavior). `backup.sh` records a `failed` artifact for a strict item whose declared paths are missing/incomplete (`empty` is now reserved for apps with no `config_paths` at all). `manifest_final` derives `ok` / `ok_with_warnings` (complete, mirror not `ok` — disabled or failed) / `degraded` (non-required missing) / `failed` (required missing) with exact `warnings:`/`failures:` and `artifact_counts:` lines; `manifest_verify_restorable` accepts `ok_with_warnings`, rejects `failed`, and `degraded` needs `--force-incomplete`; `publish_backup` treats `ok_with_warnings` as verified (no spurious rollback) and records `PUBLISH_RESULT` so `backup.sh`'s final summary never reports a rolled-back run as success. Override sandboxing hardened: an exported `REPO_ROOT` must be a `.test-tmp.*` sandbox and every destructive path is containment-checked (`require_contained_dir`). Schema accepts `schema_version: 3` during the v4 transition. Restore-side gating verified live in a sandbox; covered by `tests/test_backup_completeness.sh` (36 assertions, real sandboxed `backup.sh` runs, incl. rollback-summary + hostile-override scenarios) + extended `test_manifest.sh`/`test_static.sh`.
 
 **Retrieved facts**
 
@@ -387,7 +386,7 @@ Use per-app include lists rather than copying entire configuration roots whereve
 
 ### P2 — Reduce catalog/inventory drift — ⬜ pending
 
-**Status:** 🔓 unblocked — the dependency noted in the body ("after behavior is covered by tests") landed 2026-08-02: the automated test suite (`tests/`, 7 files / 202 assertions) is the safety net for this refactor. The `catalog: <name>` + `overrides:` resolution model and a drift-report command are still not implemented.
+**Status:** 🔓 unblocked — the dependency noted in the body ("after behavior is covered by tests") landed 2026-08-02: the automated test suite (`tests/`, 8 files / 292 assertions) is the safety net for this refactor. The `catalog: <name>` + `overrides:` resolution model and a drift-report command are still not implemented.
 
 **Resume here:** (1) schema: `catalog: <name>` + `overrides:` on apps (reference a catalog template instead of repeating values); (2) resolve effective entries in `inventory.sh list` and print resolved values in `restore.sh --plan`; (3) a drift-report command (`inventory.sh review --drift`) diffing inventory vs catalog defaults; (4) tests in `tests/`.
 

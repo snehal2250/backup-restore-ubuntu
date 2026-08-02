@@ -25,7 +25,7 @@ Instead:
 - `restore.sh` performs a **fresh install** of those items from their recommended sources
   (Ubuntu repositories, Snap Store, Flathub, official installers) at the **latest stable
   versions**, then **overwrites** them with the backed-up configuration. It validates the
-  backup manifest (requires `status: ok`) before restoring config, uses `bash -o pipefail`
+  backup manifest (requires a restorable status: `ok` or `ok_with_warnings`) before restoring config, uses `bash -o pipefail`
   for installer commands, checks installation by source (dpkg/snap/flatpak, not just
   `command -v`), tracks all failures, and exits with a nonzero accumulated code if any
   required item failed. Under `--packages-only`, services are installed but NOT
@@ -79,12 +79,14 @@ your settings over it.
    stops the run — it never moves staging over an existing live dir. The two renames are
    atomic only on one filesystem, which is verified before anything moves. The previous
    generation is retained until the new one passes final manifest verification
-   (`status: ok`); a failing generation rolls back to the last-known-good one. A cleanup
-   trap removes leftovers from interrupted runs.
+   (restorable status: `ok` or `ok_with_warnings`); a degraded/failed generation rolls
+   back to the last-known-good one. A cleanup trap removes leftovers from interrupted
+   runs.
 9. **Truthful reporting.** `restore.sh` tracks every failure via an accumulated exit code
    bitmask. If any required app install, config restore, or service fails, the script exits
    nonzero. The backup manifest records per-artifact status (`captured`/`missing`/
-   `incomplete`/`empty`) so the user knows exactly what was captured.
+   `incomplete`/`empty`/`failed`, plus `missing-unit` for services) so the user knows
+   exactly what was captured.
 10. **Source-specific installation checks.** `restore.sh` checks whether an app is
     installed by its declared source (`dpkg-query` for apt, `snap list` for snap,
     `flatpak info` for flatpak, `npm list -g` for npm-global), not just by `command -v`
@@ -203,6 +205,11 @@ apps:                          # one entry per MAIN app
                                # Ollama -> ollama pull
     conflict_policy: merge     # optional: how restore applies config when the target
                                # already has files (merge|replace|skip-existing|prompt)
+    required: false            # optional: true = this app's config MUST be fully
+                               # backed up; a missing/incomplete capture fails the run
+    on_missing: warn           # optional: warn (default) | fail — same as required: true
+                               # when set to 'fail' (both apply only to DECLARED
+                               # config_paths — an app with none is 'empty', never 'failed')
 
 services:                      # only CUSTOM services the user installed
   - unit: myservice.service
@@ -249,6 +256,8 @@ Rules for agents editing the inventory:
      releases (`SUPPORTED_ARCHS`, `SUPPORTED_UBUNTU_RELEASES` in `lib/common.sh`).
 - `schema_version`/`profile` are top-level REQUIRED keys validated by the schema;
   never bump them without updating `inventory/schema.yaml` (`$id` + version) and docs.
+  The schema accepts `schema_version: 3` during the v4 transition (every v4 change is
+  an optional addition — `required`/`on_missing`); new inventories use 4.
 - `extensions` lists extension/model IDs (without versions). During the post-install phase
   of restore, each is installed via the app's native mechanism.
 - `default_shell` is a top-level key (not per-app). The declared shell package must itself
@@ -287,13 +296,22 @@ Rules for agents editing the inventory:
 ```
 Output goes to `backups/` (git-ignored) via transactional staging, then mirrored to
 `BACKUP_DEST`. The backup manifest (`backup-info.txt`) records per-artifact status and
-overall outcome. A `status: ok` line means ALL declared artifacts were captured. Each
+overall outcome, derived from the artifact counts + mirror state:
+
+- `ok` — every declared artifact captured and the mirror ran.
+- `ok_with_warnings` — complete backup, but the mirror was not `ok` (disabled or failed) — restorable.
+- `degraded` — some non-required item is missing/incomplete (restore needs
+  `--force-incomplete`).
+- `failed` — a REQUIRED item (`required: true` / `on_missing: fail`) is missing
+  (restore refuses unless `--force-incomplete`).
+
+Each
 run also writes `SHA256SUMS` (deterministic checksums over the payload, excluding the
 manifest and mutable logs); `restore.sh` verifies it before restoring config. The
 `in_progress` marker is written into the STAGING manifest (`backups.staging/backup-info.txt`)
 when a run starts — never into the live `backups/` manifest, which is only ever replaced
 atomically by a generation that passed final verification. A missing live manifest, or
-one that does not report `status: ok`, means the last completed run did not succeed.
+one that does not report a restorable status, means the last completed run did not succeed.
 
 **Restore** (on a fresh Ubuntu install):
 ```bash
@@ -302,7 +320,7 @@ one that does not report `status: ok`, means the last completed run did not succ
 #                                   # restore config DIRECTLY from an external backup
 #                                   # snapshot (no copying into backups/ needed).
 #                                   # Preflight: realpath resolve, require a verified
-#                                   # manifest (status: ok), verify arch / Ubuntu
+#                                   # manifest (restorable status: ok/ok_with_warnings), verify arch / Ubuntu
 #                                   # release / inventory-SHA compatibility, warn on
 #                                   # writable sources, print the source before any
 #                                   # system change. Nothing is copied or mounted.
@@ -320,7 +338,8 @@ Restore runs in six phases (base, packages, apps, services, dotfiles, postinstal
 gated by `phase_enabled`/`app_selected`/`phase_canonical` in `lib/common.sh` (pure
 functions, unit-tested in `tests/test_phases.sh`). `--only`/`--skip` accept phase names
 AND app names: phase names gate whole phases, app names filter the apps phase; unknown
-names die. Restore validates the backup manifest (requires `status: ok`) and the
+names die. Restore validates the backup manifest (requires `ok` or `ok_with_warnings`;
+`degraded`/`failed` need `--force-incomplete`) and the
 SHA256SUMS content check before restoring config. Config is applied per the owner's
 `conflict_policy` (default `merge`), and every overwrite is first captured into a
 timestamped rollback bundle + restore journal (printed at the end of the run). The
@@ -358,6 +377,12 @@ enabled/started. Restore exits nonzero if any required item failed.
   `normalize_path`, `validate_path_contained`, `require_schema_validator`,
   `validate_schema_structure`, `validate_inventory`, `manifest_in_progress`,
   `manifest_final`, `manifest_verify_restorable`, `conflict_policy_get`,
+  `require_safe_dir` (rejects empty// / . / .. paths for destructive targets),
+  `require_contained_dir` (safe-dir + containment under REPO_ROOT, so a poisoned
+  override can never redirect rm -rf / mv outside the repo/test sandbox),
+  `check_phase_conflicts` (warns when phase gating suppresses everything the user
+  asked for — e.g. --packages-only --only dotfiles, or a --from-phase resume point
+  with no runnable phase at or after it),
   `rollback_init`/`rollback_capture`/`journal_log` (per-owner conflict policies,
   rollback bundle + restore journal),
   `backup_generate_checksums`/`backup_verify_integrity` (SHA256SUMS content integrity:
@@ -365,9 +390,16 @@ enabled/started. Restore exits nonzero if any required item failed.
   config restore — hostile special files, escaping symlinks, missing/corrupt files,
   extra-file warnings), `publish_backup` (transactional swap:
   same-filesystem check, fail-fast renames, rollback to the previous generation, cleanup
-  trap), `run` (dry-run aware), status checkers (`is_apt_installed`, `is_snap_installed`,
+  trap, records `PUBLISH_RESULT` — published/rolled_back/kept_unverified — so backup.sh's
+  final summary reports the true outcome), `run` (dry-run aware), status checkers (`is_apt_installed`, `is_snap_installed`,
   `is_flatpak_installed`, `is_app_installed_by_source`, `is_app_installed`),
-  `with_lock`/`release_lock` (flock). App installs go through the TYPED installer
+  `with_lock`/`release_lock` (flock).
+  Path overrides for sandboxed tests (`REPO_ROOT`/`INVENTORY_FILE`/`BACKUPS_DIR`/`STAGE`/
+  `ARTIFACTS`/`BACKUP_LOCK`) are honored ONLY when `BRU_ALLOW_TEST_OVERRIDES=1` (exported
+  by `tests/helpers.sh`); production ignores them so a stray environment variable can never
+  redirect `rm -rf`/the publish `mv` at arbitrary paths. Defense in depth: an overridden
+  `REPO_ROOT` must itself be a `.test-tmp.*` sandbox, and every destructive path is
+  containment-checked under it (`require_contained_dir`). App installs go through the TYPED installer
   functions in `lib/installers.sh` (`installer_run NAME`) — never inline shell.
 - **YAML is read with `yq`** (https://github.com/mikefarah/yq). `require_yq` follows
   `YQ_AUTO`. `app_get`/`installer_get` use `strenv(N)` for the app name (safe) and `$2`
@@ -411,7 +443,7 @@ enabled/started. Restore exits nonzero if any required item failed.
 - **Custom service** — a systemd unit the user installed themselves; only these are ever
   declared in the inventory.
 - **Manifest** — `backup-info.txt` written by `backup.sh` on completion with artifact
-  status, inventory SHA-256, and overall `status: ok` (or `degraded`). The `in_progress`
-  marker lives only in the staging manifest during a run.
+  status, inventory SHA-256, and overall `status: ok` / `ok_with_warnings` / `degraded` /
+  `failed`. The `in_progress` marker lives only in the staging manifest during a run.
 - **Transactional backup** — build in staging, validate, mirror, atomically swap to live.
   The current `backups/` is never the target of an in-progress rebuild.

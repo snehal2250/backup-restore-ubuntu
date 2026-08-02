@@ -76,6 +76,11 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   `default_shell` provenance, config-path/`exclude` nesting, cross-owner path overlap
   with the explicit exclude-allowance rule, {version} template completeness,
   supported arch/Ubuntu-release gate).
+- ✅ Backup completeness semantics (schema v4): per-item `required:` / `on_missing:`
+  (`warn`|`fail`) on apps/services; manifest granularity `ok` / `ok_with_warnings` /
+  `degraded` / `failed` with exact warning/failure counts; restore accepts
+  `ok_with_warnings`, refuses `failed`, `degraded` needs `--force-incomplete`;
+  `publish_backup` treats `ok_with_warnings` as verified.
 - ✅ Path safety: reject `..`, control chars, containment checks.
 - ✅ Architecture detection for yq bootstrap (amd64 + arm64).
 - ✅ Non-Ubuntu systems: `require_ubuntu` hard-fails (was a warning).

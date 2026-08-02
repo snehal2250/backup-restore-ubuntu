@@ -12,11 +12,57 @@ set -euo pipefail
 
 # --- Paths ---------------------------------------------------------------
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$LIB_DIR/.." && pwd)"
-INVENTORY_FILE="$REPO_ROOT/inventory/inventory.yaml"
-INVENTORY_SCHEMA="$REPO_ROOT/inventory/schema.yaml"   # versioned JSON Schema (draft 2020-12)
-# shellcheck disable=SC2034  # consumed by backup.sh / restore.sh after sourcing
-BACKUPS_DIR="$REPO_ROOT/backups"
+# Test-override guard: the automated suite (tests/) runs backup.sh against a
+# fully sandboxed repo by overriding REPO_ROOT / INVENTORY_FILE /
+# INVENTORY_SCHEMA / BACKUPS_DIR / STAGE / ARTIFACTS / BACKUP_LOCK. Production
+# must NEVER honor those overrides — a stray REPO_ROOT/BACKUPS_DIR/... in the
+# environment (another tool exporting it, a cron wrapper, a hand-rolled
+# systemd unit) could redirect destructive operations (rm -rf staging, the
+# publish mv) at arbitrary paths. Overrides only apply when the test harness
+# explicitly opts in with BRU_ALLOW_TEST_OVERRIDES=1 (exported by
+# tests/helpers.sh); otherwise the defaults below are unconditional.
+BRU_ALLOW_TEST_OVERRIDES="${BRU_ALLOW_TEST_OVERRIDES:-0}"
+if [ "$BRU_ALLOW_TEST_OVERRIDES" = "1" ]; then
+  # The opt-in sentinel alone must never unlock arbitrary destructive paths.
+  # When REPO_ROOT is EXPORTED into the environment (a production wrapper, a
+  # stray export, a sandboxed backup.sh child), it must point at a TEST
+  # SANDBOX (.test-tmp.* under the real repo — the only layout
+  # tests/helpers.sh's sandbox_new produces). This stops a stray
+  # BRU_ALLOW_TEST_OVERRIDES=1 from redirecting the staging rm -rf / publish
+  # mv at /srv/data or any other path through a poisoned REPO_ROOT. backup.sh
+  # additionally containment-checks STAGE, ARTIFACTS, BACKUPS_DIR and
+  # BACKUP_LOCK under REPO_ROOT (require_contained_dir) before anything
+  # destructive runs.
+  # NOTE: helpers.sh sets REPO_ROOT as a PLAIN (non-exported) shell variable
+  # in the test process, which does not appear in `env` — only an actual
+  # environment override trips this guard.
+  _bru_root_in_env=0
+  while IFS= read -r _bru_line; do
+    case "$_bru_line" in
+      REPO_ROOT=*) _bru_root_in_env=1; break ;;
+    esac
+  done < <(env)
+  if [ "$_bru_root_in_env" = "1" ]; then
+    _bru_root_real="$(realpath -m -- "$REPO_ROOT" 2>/dev/null || printf '%s' "$REPO_ROOT")"
+    case "$(basename "$_bru_root_real")" in
+      .test-tmp.*) : ;;
+      *)
+        # err() is not defined yet at source time — format the message inline.
+        printf '\033[1;31m[ERR ]\033[0m %s\n' "BRU_ALLOW_TEST_OVERRIDES=1 but REPO_ROOT='$REPO_ROOT' is not a test sandbox (.test-tmp.*) — refusing to honor path overrides." >&2
+        exit 1 ;;
+    esac
+  fi
+  REPO_ROOT="${REPO_ROOT:-$(cd "$LIB_DIR/.." && pwd)}"
+  INVENTORY_FILE="${INVENTORY_FILE:-$REPO_ROOT/inventory/inventory.yaml}"
+  INVENTORY_SCHEMA="${INVENTORY_SCHEMA:-$REPO_ROOT/inventory/schema.yaml}"   # versioned JSON Schema (draft 2020-12)
+  # shellcheck disable=SC2034  # consumed by backup.sh / restore.sh after sourcing
+  BACKUPS_DIR="${BACKUPS_DIR:-$REPO_ROOT/backups}"
+else
+  REPO_ROOT="$(cd "$LIB_DIR/.." && pwd)"
+  INVENTORY_FILE="$REPO_ROOT/inventory/inventory.yaml"
+  INVENTORY_SCHEMA="$REPO_ROOT/inventory/schema.yaml"
+  BACKUPS_DIR="$REPO_ROOT/backups"
+fi
 BACKUP_MANIFEST="$BACKUPS_DIR/backup-info.txt"
 # Local-disk mirror destination for backup.sh (env-overridable; empty string disables).
 BACKUP_DEST="${BACKUP_DEST-/media/vikram-athare/Storage/backup-restore-ubuntu}"
@@ -45,6 +91,63 @@ ok()   { printf '\033[1;32m[ OK ]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[WARN]\033[0m %s\n' "$*"; }
 err()  { printf '\033[1;31m[ERR ]\033[0m %s\n' "$*" >&2; }
 die()  { err "$*"; exit 1; }
+
+# require_safe_dir NAME PATH — defensive guard for the directories destructive
+# operations run against (staging, artifact file, live backups). Rejects
+# empty, '/', '.', '..' and any path that realpath-resolves to one of those.
+# Returns 1 (after err) when unsafe; callers decide whether to die.
+require_safe_dir() {
+  local name="$1" val="$2"
+  case "$val" in
+    ""|"/"|"."|"..")
+      err "Unsafe $name path: '$val' — refusing to run."; return 1 ;;
+  esac
+  local real
+  real="$(realpath -m -- "$val" 2>/dev/null || true)"
+  case "$real" in
+    ""|"/"|"."|"..")
+      err "Unsafe $name path resolves to '$real' — refusing to run."; return 1 ;;
+  esac
+  return 0
+}
+
+# require_contained_dir NAME PATH ROOT — require_safe_dir plus a containment
+# check: PATH's realpath must be ROOT itself or live under it. Used for every
+# directory destructive operations run against (staging, artifact file, live
+# backups, lock file) so a poisoned environment or a bad test override can
+# never redirect rm -rf / mv outside the repo (or the test sandbox).
+# Production paths always derive from REPO_ROOT, so this is a no-op guard
+# there.
+require_contained_dir() {
+  local name="$1" val="$2" root="$3"
+  require_safe_dir "$name" "$val" || return 1
+  require_safe_dir "$name" "$root" || return 1
+  local rv rr re rrf
+  rv="$(realpath -m -- "$val" 2>/dev/null || printf '%s' "$val")"
+  rr="$(realpath -m -- "$root" 2>/dev/null || printf '%s' "$root")"
+  case "$rv" in
+    "$rr"|"$rr"/*) : ;;
+    *)
+      err "Unsafe $name path: '$val' escapes root '$root' — refusing to run."
+      return 1 ;;
+  esac
+  # Symlink hardening: realpath -m is purely lexical, so a symlink INSIDE the
+  # root pointing outside (e.g. $SB/backups -> /etc) would pass the check
+  # above. When the paths already exist, resolve symlinks fully and re-check.
+  # Non-existent paths are fine — there is nothing to follow yet.
+  if [ -e "$val" ] && [ -e "$root" ]; then
+    re="$(realpath -e -- "$val" 2>/dev/null || true)"
+    rrf="$(realpath -e -- "$root" 2>/dev/null || true)"
+    if [ -n "$re" ] && [ -n "$rrf" ]; then
+      case "$re" in
+        "$rrf"|"$rrf"/*) return 0 ;;
+      esac
+      err "Unsafe $name path: '$val' resolves (through symlinks) to '$re' outside '$root' — refusing to run."
+      return 1
+    fi
+  fi
+  return 0
+}
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"
@@ -621,12 +724,30 @@ manifest_final() {
   os_ver=""
   [ -r /etc/os-release ] && { . /etc/os-release; os_ver="${VERSION_ID:-}"; } 2>/dev/null || true
 
-  # Derive the overall status from the artifact list. Any missing/incomplete
-  # artifact degrades the backup (an app with no config paths is 'empty', not a
-  # failure). Restore requires 'status: ok' before restoring configuration.
-  if [ -s "$artifact_file" ] && grep -Eq '/(missing|incomplete|missing-unit)$' "$artifact_file"; then
+  # Backup-completeness status, derived from the artifact list + mirror state:
+  #   * any 'failed' artifact (a REQUIRED item missing)    -> failed
+  #   * any missing/incomplete/missing-unit (non-required) -> degraded
+  #   * otherwise, mirror not 'ok' (disabled/failed)       -> ok_with_warnings
+  #   * otherwise                                          -> ok
+  # Restore allows 'ok' and 'ok_with_warnings'; 'degraded' and 'failed' need
+  # --force-incomplete. An app with no config paths is 'empty' — informational,
+  # not a failure. Exact warning/failure counts are recorded in the manifest.
+  local n_failed n_missing n_incomplete n_missing_unit n_captured n_empty
+  n_failed="$(manifest_count_status failed "$artifact_file")"
+  n_missing="$(manifest_count_status missing "$artifact_file")"
+  n_incomplete="$(manifest_count_status incomplete "$artifact_file")"
+  n_missing_unit="$(manifest_count_status missing-unit "$artifact_file")"
+  n_captured="$(manifest_count_status captured "$artifact_file")"
+  n_empty="$(manifest_count_status empty "$artifact_file")"
+  if [ "$n_failed" -gt 0 ]; then
+    overall="failed"
+  elif [ "$(( n_missing + n_incomplete + n_missing_unit ))" -gt 0 ]; then
     overall="degraded"
+  elif [ "$mir_stat" != "ok" ]; then
+    overall="ok_with_warnings"
   fi
+  local n_warnings=$(( n_missing + n_incomplete + n_missing_unit ))
+  [ "$mir_stat" != "ok" ] && n_warnings=$(( n_warnings + 1 ))
 
   {
     echo "run_id: $run_id"
@@ -641,6 +762,9 @@ manifest_final() {
     echo "started: ${BACKUP_STARTED:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
     echo "finished: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "mirror: $mir_stat"
+    echo "artifact_counts: captured=$n_captured empty=$n_empty missing=$n_missing incomplete=$n_incomplete missing-unit=$n_missing_unit failed=$n_failed"
+    echo "warnings: $n_warnings"
+    echo "failures: $n_failed"
     echo "---"
     if [ -s "$artifact_file" ]; then
       cat "$artifact_file"
@@ -657,21 +781,35 @@ manifest_count_status() {
   grep -c "^.*/$status$" "$file" 2>/dev/null || true
 }
 
-# Verify a manifest for restore readiness.
-# Returns 0 if the backup is complete and can be restored.
-# Returns 1 if the backup is incomplete/degraded and should not be restored
-# without explicit override.
+# Verify a manifest for restore readiness (backup-completeness semantics).
+# Returns 0 for 'ok' and 'ok_with_warnings' (restorable).
+# Returns 1 for 'failed' (a REQUIRED item is missing), 'degraded' (missing
+# non-required items), 'in_progress' (interrupted) or any invalid status —
+# restore.sh lets --force-incomplete override the two refusal cases.
 manifest_verify_restorable() {
   local mf="$1"
   [ -f "$mf" ] || { err "No backup manifest found at $mf."; return 1; }
 
-  if ! grep -q '^status: ok$' "$mf"; then
-    err "Backup manifest does not report 'status: ok' — the backup is incomplete or failed."
-    if grep -q '^status: in_progress$' "$mf"; then
-      err "  The last backup run was interrupted (still 'in_progress'). Do not restore from this snapshot."
-    fi
-    return 1
-  fi
+  local st=""
+  st="$(grep -m1 '^status: ' "$mf" 2>/dev/null | cut -d' ' -f2- || true)"
+  case "$st" in
+    ok)
+      : ;;
+    ok_with_warnings)
+      warn "Backup manifest reports 'ok_with_warnings' — the backup is complete but the run had warnings (e.g. the mirror was disabled or failed). Restoring anyway." ;;
+    failed)
+      err "Backup manifest reports 'failed' — a REQUIRED item is missing from this backup. Refusing to restore (use --force-incomplete only if you understand why)."
+      return 1 ;;
+    degraded)
+      err "Backup manifest reports 'degraded' — some items are missing or incomplete. Refusing to restore without --force-incomplete."
+      return 1 ;;
+    in_progress)
+      err "The last backup run was interrupted (still 'in_progress'). Do not restore from this snapshot."
+      return 1 ;;
+    *)
+      err "Backup manifest does not report a valid status — the backup is incomplete or failed."
+      return 1 ;;
+  esac
 
   # Check that at least some artifacts were captured.
   if ! grep -q '^---$' "$mf"; then
@@ -679,7 +817,7 @@ manifest_verify_restorable() {
     return 1
   fi
 
-  ok "Backup manifest verified: status=ok"
+  ok "Backup manifest verified: status=$st"
   return 0
 }
 
@@ -691,7 +829,8 @@ manifest_verify_restorable() {
 #   * The live dir is renamed aside FIRST, and the script fails immediately
 #     if that rename fails — it never moves staging over an existing live dir.
 #   * The previous generation is kept until the new one passes a final
-#     manifest verification ('status: ok'); only then is it dropped.
+#     manifest verification (restorable: 'status: ok' or 'ok_with_warnings');
+#     only then is it dropped.
 #   * If the new generation fails verification and a previous generation
 #     exists, we roll back to it (restore refuses non-ok manifests, so a
 #     degraded live backup would be unusable).
@@ -703,17 +842,22 @@ manifest_verify_restorable() {
 publish_backup() {
   _PUBLISHED=0
   _old_gen=""
+  # Outcome for backup.sh's final summary: 'published' (new generation live),
+  # 'rolled_back' (new generation non-restorable, previous kept live) or
+  # 'kept_unverified' (non-restorable and no previous generation to fall back
+  # to). Read AFTER publish_backup returns.
+  PUBLISH_RESULT=""
   _cleanup_publish() {
     local rc="$1"
     # Clear traps first: a signal handler that exits would otherwise re-fire
     # the EXIT trap and run this cleanup twice.
     trap - EXIT INT TERM
     # Not yet published + a previous generation exists => the new generation
-    # was never verified (live absent, or present but not 'status: ok' because
+    # was never verified (live absent, or present but not restorable because
     # a signal landed between the swap and verification). Restore the
     # last-known-good so it stays live.
     if [ "$_PUBLISHED" != "1" ] && [ -d "$_old_gen" ]; then
-      if [ ! -d "$BACKUPS_DIR" ] || ! grep -q '^status: ok$' "$BACKUP_MANIFEST" 2>/dev/null; then
+      if [ ! -d "$BACKUPS_DIR" ] || ! grep -Eq '^status: (ok|ok_with_warnings)$' "$BACKUP_MANIFEST" 2>/dev/null; then
         rm -rf "$BACKUPS_DIR" 2>/dev/null || true
         if mv "$_old_gen" "$BACKUPS_DIR" 2>/dev/null; then
           warn "Backup run interrupted before the new generation was verified — restored the previous backup generation."
@@ -770,34 +914,41 @@ publish_backup() {
   fi
 
   # Final verification: keep (or restore) the previous generation unless the
-  # new one reports 'status: ok'. Three cases:
-  #   * manifest present + 'status: ok'   -> keep the new generation, drop old
-  #   * manifest present + degraded       -> restore the old generation if one
-  #     exists; otherwise keep the new one as-is (it is the only snapshot, and
-  #     restore.sh can use it with --force-incomplete), with a loud warning.
-  #   * manifest absent (or unreadable)   -> the new generation is unusable by
-  #     restore.sh (hard refusal, no override). Restore the old generation if
-  #     one exists; otherwise remove the broken live dir and fail hard.
-  if grep -q '^status: ok$' "$BACKUP_MANIFEST" 2>/dev/null; then
+  # new one is restorable ('status: ok' or 'ok_with_warnings' — the latter is
+  # a complete backup with only warnings, e.g. the mirror did not run or
+  # failed; restore accepts both). The outcome is recorded in PUBLISH_RESULT
+  # so backup.sh's final summary reflects what ACTUALLY happened (a rollback
+  # must never be reported as a fresh success). Cases:
+  #   * manifest present + restorable      -> published (keep new, drop old)
+  #   * manifest present + degraded/failed -> rolled_back if an old generation
+  #     exists; otherwise kept_unverified (the only snapshot; restore.sh can
+  #     use it with --force-incomplete), with a loud warning.
+  #   * manifest absent (or unreadable)    -> rolled_back if an old generation
+  #     exists; otherwise remove the broken live dir and fail hard.
+  if grep -Eq '^status: (ok|ok_with_warnings)$' "$BACKUP_MANIFEST" 2>/dev/null; then
     _PUBLISHED=1
+    PUBLISH_RESULT="published"
   elif [ -r "$BACKUP_MANIFEST" ]; then
-    warn "The new generation's manifest does not report 'status: ok' — restore would need --force-incomplete."
+    warn "The new generation's manifest does not report a restorable status ('ok'/'ok_with_warnings') — restore would need --force-incomplete."
     if [ -d "$_old_gen" ]; then
       rm -rf "$BACKUPS_DIR" || die "Could not remove the unverified generation at $BACKUPS_DIR — previous backup preserved at $_old_gen."
       if mv "$_old_gen" "$BACKUPS_DIR" 2>/dev/null; then
         warn "Rolled back to the previous (verified) backup generation."
+        PUBLISH_RESULT="rolled_back"
       else
         die "Could not roll back — the previous generation is preserved at $_old_gen."
       fi
     else
       warn "No previous generation to roll back to — keeping the new generation as-is (review backup-info.txt)."
       _PUBLISHED=1
+      PUBLISH_RESULT="kept_unverified"
     fi
   else
     if [ -d "$_old_gen" ]; then
       rm -rf "$BACKUPS_DIR" || die "Could not remove the unverified generation at $BACKUPS_DIR — previous backup preserved at $_old_gen."
       if mv "$_old_gen" "$BACKUPS_DIR" 2>/dev/null; then
         warn "The new generation has no manifest — rolled back to the previous (verified) backup generation."
+        PUBLISH_RESULT="rolled_back"
       else
         die "Could not roll back — the previous generation is preserved at $_old_gen."
       fi
@@ -933,6 +1084,48 @@ phase_canonical() {
     base|packages|apps|services|dotfiles|postinstall) printf '%s\n' "$1" ;;
     user-data) printf 'dotfiles\n' ;;
   esac
+}
+
+# check_phase_conflicts — warn when the resumability flags (--only/--from-phase)
+# contradict the legacy modes (--configs-only/--packages-only) and would
+# silently skip phases the user explicitly asked for. Pure-ish (reads the same
+# globals as phase_enabled) — unit-tested in tests/test_phases.sh.
+check_phase_conflicts() {
+  local p n=0 skipped="" from="${PHASES_FROM:-}" seeing=0 any=0 p2 all_suppressed=0
+  if [ "${#PHASES_ONLY[@]}" -gt 0 ]; then
+    for p in "${PHASES_ONLY[@]}"; do
+      if ! phase_enabled "$p"; then
+        n=$((n + 1))
+        [ -n "$skipped" ] && skipped="$skipped, "
+        skipped="$skipped$p"
+      fi
+    done
+    if [ "$n" -gt 0 ] && [ "$n" = "${#PHASES_ONLY[@]}" ]; then
+      warn "--only phase(s) ($skipped) are all suppressed by phase gating (--configs-only/--packages-only/--from-phase/--skip) — nothing will run in this phase set."
+      all_suppressed=1
+    elif [ "$n" -gt 0 ]; then
+      warn "--only phase(s) suppressed by phase gating: $skipped."
+    fi
+  fi
+  # The --from-phase resume point itself does NOT need to run — it only marks
+  # where to start. What matters is whether ANY canonical phase at or after it
+  # can still run (e.g. --from-phase services --only dotfiles is fine: dotfiles
+  # comes after services and runs). Warn only when the whole at-or-after set is
+  # suppressed and the run would do nothing — and skip it when the --only
+  # warning above already said nothing will run (avoids a redundant second
+  # warning for the same outcome).
+  if [ -n "$from" ] && [ "$all_suppressed" = "0" ]; then
+    for p2 in "${PHASE_ORDER[@]}"; do
+      [ "$p2" = "$from" ] && seeing=1
+      if [ "$seeing" = "1" ] && phase_enabled "$p2"; then
+        any=1
+        break
+      fi
+    done
+    if [ "$any" = "0" ]; then
+      warn "--from-phase $from: no phase at or after it is enabled (suppressed by phase gating) — the run may do nothing."
+    fi
+  fi
 }
 
 # phase_enabled NAME -> 0 if the phase should run, 1 if it must be skipped.

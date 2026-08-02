@@ -27,6 +27,18 @@
 # (see docs/RESTORE.md). Optional and backward compatible — existing
 # inventories without the key behave exactly as before.
 #
+# v4 changes: apps and services may declare an optional `required` (bool,
+# default false) and `on_missing` (warn | fail, default warn) to express
+# BACKUP COMPLETENESS semantics. An item whose declared paths are missing is
+# recorded as `incomplete`/`missing` (degrading the backup to `degraded`)
+# unless it opts into strictness: `required: true` or `on_missing: fail`
+# turns that into a `failed` artifact and the overall status becomes `failed`
+# (restore refuses by default). The manifest also reports exact
+# artifact_counts / warnings / failures. Optional and backward compatible.
+# NOTE: because every v4 change is an optional addition, `schema_version: 3`
+# inventories remain valid during the transition — the schema accepts both 3
+# and 4. New inventories use 4.
+#
 # Semantic rules that a schema cannot express — unique app/service names,
 # default_shell provided by a declared package, overlapping path ownership,
 # config nested under an excluded path, {version} URL template completeness,
@@ -34,8 +46,8 @@
 # lib/common.sh. This file is structure only.
 # =============================================================================
 $schema: "https://json-schema.org/draft/2020-12/schema"
-$id: "https://backup-restore-ubuntu.local/schema/inventory-v3"
-title: "Backup-Restore-Ubuntu inventory schema (v3)"
+$id: "https://backup-restore-ubuntu.local/schema/inventory-v4"
+title: "Backup-Restore-Ubuntu inventory schema (v4)"
 description: "Structural contract for inventory/inventory.yaml, profile: workstation."
 
 type: object
@@ -57,8 +69,8 @@ required:
 
 properties:
   schema_version:
-    const: 3
-    description: "Must equal the version implemented by this schema file."
+    enum: [3, 4]
+    description: "4 is the current version; 3 is accepted during the v4 transition (every v4 change is an optional, backward-compatible addition). New inventories use 4."
   profile:
     enum:
       - workstation
@@ -157,7 +169,15 @@ $defs:
       conflict_policy:
         enum: [merge, replace, skip-existing, prompt]
         default: merge
-        description: "How restore applies this app's config when the target already has files: merge = additive overlay, never deletes (default); replace = preserve existing into the rollback bundle, then mirror the backup exactly (rsync --delete); skip-existing = restore only missing files; prompt = ask per config path (non-interactive runs skip)."
+        description: "How restore applies this app's config when the target already has files: merge = additive overlay, never deletes (default); replace = preserve existing into the rollback bundle, then mirror the backup exactly; skip-existing = restore only missing files; prompt = ask per config path (non-interactive runs skip)."
+      required:
+        type: boolean
+        default: false
+        description: "Backup-completeness policy: if true, a missing/incomplete artifact for this app makes the backup overall 'failed' (restore refuses by default). Default false = the app's missing paths only degrade the backup. Applies ONLY to declared config_paths — an app with no config_paths is recorded 'empty' (informational) and can never be 'failed'."
+      on_missing:
+        enum: [warn, fail]
+        default: warn
+        description: "Per-app policy for missing declared config paths: warn (default) records them as incomplete and degrades the backup; fail records a 'failed' artifact (same effect as required: true). Applies ONLY to declared config_paths (see required)."
 
   installer:
     type: object
@@ -427,3 +447,11 @@ $defs:
         enum: [merge, replace, skip-existing, prompt]
         default: merge
         description: "How restore applies this service's config when the target already has files (same semantics as the app-level key; the unit file itself is always replaced)."
+      required:
+        type: boolean
+        default: false
+        description: "Backup-completeness policy: if true, a missing unit file or missing config paths for this service make the backup overall 'failed' (restore refuses by default). Default false = missing parts only degrade the backup. Unlike apps, the unit file itself is always an artifact, so required: true with config_paths: [] is meaningful (a missing unit is still 'failed')."
+      on_missing:
+        enum: [warn, fail]
+        default: warn
+        description: "Per-service policy for missing parts: warn (default) degrades the backup; fail records a 'failed' artifact (same effect as required: true)."

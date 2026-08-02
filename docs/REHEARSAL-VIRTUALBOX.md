@@ -183,12 +183,12 @@ newest=$(ls -1dr /media/sf_snapshots/backup-* | head -1)
 cp -a "$newest/." backups/
 
 # Confirm the marker BEFORE running restore:
-tail -5 backups/backup-info.txt     # must show a 'status: ok' line
+tail -5 backups/backup-info.txt     # must show a restorable status ('ok' or 'ok_with_warnings')
 ```
 
 > Or skip the copy entirely and point restore straight at the snapshot:
 > `./restore.sh --source "$newest" --dry-run` (§ 6) — `--source` verifies the snapshot's
-> `backup-info.txt` (`status: ok`), checks architecture / Ubuntu release / inventory
+> `backup-info.txt` (restorable status `ok`/`ok_with_warnings`), checks architecture / Ubuntu release / inventory
 > compatibility, and reads config directly from the live share (no copying).
 >
 > `backups/` is git-ignored, so a fresh clone won't have it — copying the newest snapshot

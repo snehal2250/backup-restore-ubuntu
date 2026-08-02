@@ -74,26 +74,37 @@ Make sure the snapshot you are about to use is current:
 
 # 3. Confirm the last backup SUCCEEDED before you go (see "How do I know the
 #    last backup succeeded?" in README.md):
-tail -5 backups/backup-info.txt      # must contain a 'status: ok' line
+tail -5 backups/backup-info.txt      # must show a restorable status ('ok' or 'ok_with_warnings')
 #   Also confirm the newest mirror snapshot carries the same marker:
 newest=$(ls -1dr /media/vikram-athare/Storage/backup-restore-ubuntu/backup-* | head -1)
 tail -5 "$newest/backup-info.txt"
 ```
 
-> If `backup-info.txt` reports `status: degraded`, the last run **completed** but some
-> declared paths were missing/incomplete — re-run `./backup.sh` and fix what it reports
-> (or restore with `--force-incomplete`). If the file is **missing entirely**, no
-> completed, verified run exists — re-run `./backup.sh` before restoring from a snapshot.
+> The manifest reports one of four statuses: `ok` (all captured + mirror ran),
+> `ok_with_warnings` (complete backup; mirror not `ok` — disabled or failed —
+> restorable), `degraded` (some
+> non-required item missing/incomplete — restore needs `--force-incomplete`), or
+> `failed` (a REQUIRED item — `required: true` / `on_missing: fail` — is missing;
+> restore refuses by default). For `degraded`/`failed`, re-run `./backup.sh` and fix
+> what it reports (or restore with `--force-incomplete`). If the file is **missing
+> entirely**, no completed, verified run exists — re-run `./backup.sh` before restoring
+> from a snapshot.
 >
 > **Local vs. snapshot marker:** the local `backups/backup-info.txt` reflects the last
 > **completed, verified** run. `backup.sh` never truncates it mid-run — the `in_progress`
 > marker is written to the staging manifest instead — and it is replaced atomically only
 > when a run finishes successfully. A run that aborts during capture leaves the previous
-> `status: ok` marker intact; a missing local file means no completed run exists (or the
+> restorable marker intact; a missing local file means no completed run exists (or the
 > run died inside the atomic swap). The newest mirror snapshot only receives the marker on
 > a successful run — so check the **local** file for the truth about the most recent run,
 > and only then verify the snapshot you are about to restore from carries a matching
 > marker.
+>
+> **Snapshot authority:** the newest mirror snapshot is **not** automatically the last
+> successful backup — publication rolls back a degraded/failed generation to the previous
+> one, so a snapshot can be *newer* than the local live backup while the local one stays
+> the restorable truth, and a snapshot itself can carry `degraded`/`failed`. Judge every
+> snapshot **on its own `backup-info.txt`**, never by its timestamp (see § 3).
 
 The mirror lives at `BACKUP_DEST` (default `/media/vikram-athare/Storage/backup-restore-ubuntu`)
 as timestamped snapshots, keeping the newest `BACKUP_KEEP` (default 5). The newest
@@ -155,7 +166,8 @@ cp -a "$newest/." backups/
 > ```
 >
 > `--source` resolves the path with `realpath`, requires a **verified** `backup-info.txt`
-> (`status: ok` + artifact list; `--force-incomplete` to override), and checks
+> (restorable status `ok`/`ok_with_warnings` + artifact list; `degraded`/`failed` need
+> `--force-incomplete`), and checks
 > architecture / Ubuntu release / inventory-SHA compatibility before any system change.
 > It warns if the source is writable (a read-only medium is safer), and prints the exact
 > source snapshot before touching anything. Nothing is copied or mounted implicitly.
@@ -431,7 +443,7 @@ sudo usermod -aG vboxusers "$USER"      # add yourself, then log out/in once
 
 ```bash
 ./backup.sh
-tail -5 backups/backup-info.txt        # must show a 'status: ok' line
+tail -5 backups/backup-info.txt        # must show a restorable status ('ok' or 'ok_with_warnings')
 ```
 Use this newest snapshot as the rehearsal's config source.
 
@@ -563,6 +575,7 @@ snapshot.
 | `unsupported architecture` / `unsupported Ubuntu release` | This repo hard-blocks platforms outside `SUPPORTED_ARCHS`/`SUPPORTED_UBUNTU_RELEASES` (amd64/arm64, Ubuntu 22.04/24.04). Use a supported machine or extend the constants in `lib/common.sh`. |
 | `No backups/ found — configuration cannot be restored` | You skipped step 2.3. Copy the newest snapshot into `backups/`, or just pass `--source "$newest"` (§ 2.3 alternative) and re-run. |
 | `Backup content integrity check FAILED` | The snapshot's `SHA256SUMS` doesn't match its files — corruption, a partial copy, or tampering. Re-run `./backup.sh` and bring a fresh snapshot; use `--force-incomplete` only if you accept the risk. |
+| `Backup manifest reports 'failed'` | A REQUIRED item (`required: true` / `on_missing: fail`) was missing at backup time. Fix the declared paths on your working machine and re-run `./backup.sh`; use `--force-incomplete` only if you accept the gap. |
 | "Where did my pre-restore config go?" | Every overwrite is captured first into the rollback bundle `~/.local/state/backup-restore-ubuntu/rollback-<timestamp>/` (path printed at the end of the restore run; journal in `restore-journal.log`). Copy files back to undo, `rm -rf` the bundle once satisfied. |
 | `Backup source not found: ...` | `--source` pointed at a nonexistent path, or at a mirror *root* (a folder of `backup-*` snapshots) instead of a single snapshot. Pass a snapshot directory that contains `backup-info.txt` (the error prints the newest snapshot to use). |
 | `Backup was created on architecture '...' but this machine is '...'` | The `--source` snapshot was made on a different CPU architecture — restore refuses incompatible config by design. Make a backup on this machine's architecture and re-run. |

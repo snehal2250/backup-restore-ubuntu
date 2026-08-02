@@ -18,7 +18,16 @@ SCHEMA_AUTO=2   # schema validator: ask before installing python3-jsonschema
 require_yq "$YQ_AUTO"
 
 # --- Concurrency protection ----------------------------------------------
-with_lock "$REPO_ROOT/.backup.lock"
+# The lock path is test-overridable only under the explicit test override opt-in
+# (BRU_ALLOW_TEST_OVERRIDES=1, exported by tests/helpers.sh) so sandboxed runs
+# never contend for the real repo lock; production always uses the repo lock.
+if [ "$BRU_ALLOW_TEST_OVERRIDES" = "1" ]; then
+  BACKUP_LOCK="${BACKUP_LOCK:-$REPO_ROOT/.backup.lock}"
+  require_contained_dir BACKUP_LOCK "$BACKUP_LOCK" "$REPO_ROOT" || die "Unsafe BACKUP_LOCK path — aborting."
+  with_lock "$BACKUP_LOCK"
+else
+  with_lock "$REPO_ROOT/.backup.lock"
+fi
 
 # --- Validate inventory --------------------------------------------------
 validate_inventory || die "Inventory validation failed — fix inventory.yaml and re-run."
@@ -26,8 +35,22 @@ validate_inventory || die "Inventory validation failed — fix inventory.yaml an
 # --- Setup: staging directory --------------------------------------------
 BACKUP_RUN_ID="$(date -u +%Y%m%dT%H%M%S)-$$"
 BACKUP_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-STAGE="$REPO_ROOT/backups.staging"
-ARTIFACTS="$REPO_ROOT/backups.artifacts"
+# STAGE/ARTIFACTS are test-overridable only under the explicit test override
+# opt-in (BRU_ALLOW_TEST_OVERRIDES=1, see tests/test_backup_completeness.sh);
+# production always uses the repo-local paths. Every path destructive
+# operations run against is validated with require_contained_dir (safe + under
+# REPO_ROOT) — a poisoned environment or a bad override must never redirect
+# rm -rf / mv at an arbitrary path.
+if [ "$BRU_ALLOW_TEST_OVERRIDES" = "1" ]; then
+  STAGE="${STAGE:-$REPO_ROOT/backups.staging}"
+  ARTIFACTS="${ARTIFACTS:-$REPO_ROOT/backups.artifacts}"
+else
+  STAGE="$REPO_ROOT/backups.staging"
+  ARTIFACTS="$REPO_ROOT/backups.artifacts"
+fi
+require_contained_dir STAGE "$STAGE" "$REPO_ROOT" || die "Unsafe STAGE path — aborting."
+require_contained_dir ARTIFACTS "$ARTIFACTS" "$REPO_ROOT" || die "Unsafe ARTIFACTS path — aborting."
+require_contained_dir BACKUPS_DIR "$BACKUPS_DIR" "$REPO_ROOT" || die "Unsafe BACKUPS_DIR path — aborting."
 
 # Clean up any stale staging from a previous run that crashed.
 rm -rf "$STAGE" "$ARTIFACTS"
@@ -61,7 +84,13 @@ while IFS= read -r name; do
   mkdir -p "$dest/home" "$dest/root"
   info "Backing up config for app: $name"
   _app_ok=1
-  _app_empty=1
+  _app_paths=0   # any config_path declared (non-empty) seen
+  # Backup-completeness policy (schema v4): `required: true` or
+  # `on_missing: fail` turns a missing/incomplete artifact into 'failed'
+  # (overall status failed, restore refuses by default).
+  _app_strict="no"
+  [ "$(app_get "$name" '.required // false')" = "true" ] && _app_strict="yes"
+  [ "$(app_get "$name" '.on_missing // "warn"')" = "fail" ] && _app_strict="yes"
 
   excl=()
   while IFS= read -r e; do
@@ -73,13 +102,13 @@ while IFS= read -r name; do
 
   while IFS= read -r p; do
     [ -n "$p" ] || continue
+    _app_paths=1
     src="$(expand_path "$p")"
     if [ ! -e "$src" ]; then
       warn "  skip (path not found): $p"
       _app_ok=0
       continue
     fi
-    _app_empty=0
     if [[ "$src" == "$HOME"* ]]; then
       rel="${src#"$HOME"/}"
       if ( cd "$HOME" && _safe_rsync "$dest/home" "./$rel" "${excl[@]}" ); then
@@ -99,10 +128,15 @@ while IFS= read -r name; do
     fi
   done < <(app_get "$name" '.config_paths[]?')
 
-  if [ "$_app_empty" = "1" ]; then
+  if [ "$_app_paths" = "0" ]; then
+    # No config_paths declared at all — nothing to back up by design.
     record_artifact "apps/$name" "empty"
   elif [ "$_app_ok" = "1" ]; then
     record_artifact "apps/$name" "captured"
+  elif [ "$_app_strict" = "yes" ]; then
+    # required: true / on_missing: fail — a missing or partial config is a
+    # failure (overall status failed, restore refuses by default).
+    record_artifact "apps/$name" "failed"
   else
     record_artifact "apps/$name" "incomplete"
   fi
@@ -115,6 +149,10 @@ while IFS=$'\t' read -r unit target; do
   mkdir -p "$sdest/home" "$sdest/root"
   _svc_ok=1
   _svc_has_unit=0
+  # Backup-completeness policy (schema v4), same semantics as apps.
+  _svc_strict="no"
+  [ "$(unit="$unit" yq -r ".services[] | select(.unit == strenv(unit)) | .required // false" "$INVENTORY_FILE")" = "true" ] && _svc_strict="yes"
+  [ "$(unit="$unit" yq -r ".services[] | select(.unit == strenv(unit)) | .on_missing // \"warn\"" "$INVENTORY_FILE")" = "fail" ] && _svc_strict="yes"
 
   if [ "$target" = "user" ]; then
     src="$HOME/.config/systemd/user/$unit"
@@ -162,6 +200,8 @@ while IFS=$'\t' read -r unit target; do
 
   if [ "$_svc_ok" = "1" ] && [ "$_svc_has_unit" = "1" ]; then
     record_artifact "services/$unit" "captured"
+  elif [ "$_svc_strict" = "yes" ]; then
+    record_artifact "services/$unit" "failed"
   elif [ "$_svc_has_unit" = "0" ]; then
     record_artifact "services/$unit" "missing-unit"
   else
@@ -208,9 +248,11 @@ done < <(yaml_list '.user_dirs[]')
 # --- Determine overall status ---------------------------------------------
 _missing_count="$(manifest_count_status "missing" "$ARTIFACTS")"
 _incomplete_count="$(manifest_count_status "incomplete" "$ARTIFACTS")"
+_missing_unit_count="$(manifest_count_status "missing-unit" "$ARTIFACTS")"
+_failed_count="$(manifest_count_status "failed" "$ARTIFACTS")"
 
-if [ "$_missing_count" -gt 0 ] || [ "$_incomplete_count" -gt 0 ]; then
-  warn "  $_missing_count declared path(s) missing, $_incomplete_count incomplete."
+if [ "$_missing_count" -gt 0 ] || [ "$_incomplete_count" -gt 0 ] || [ "$_missing_unit_count" -gt 0 ] || [ "$_failed_count" -gt 0 ]; then
+  warn "  $_missing_count declared path(s) missing, $_incomplete_count incomplete, $_missing_unit_count service unit(s) missing, $_failed_count failed (required items)."
 fi
 
 # --- Content integrity: deterministic checksums over the staged payload ---
@@ -293,14 +335,27 @@ publish_backup
 release_lock
 
 echo
-if grep -q '^status: ok$' "$BACKUP_MANIFEST" 2>/dev/null; then
-  ok "Backup complete."
-else
-  warn "Backup finished with issues — see backup-info.txt (restore would need --force-incomplete)."
-fi
+# The summary reflects what publication ACTUALLY did (PUBLISH_RESULT from
+# publish_backup), not what the now-live manifest says — after a rollback the
+# live manifest is the PREVIOUS generation's, so grepping it would report a
+# false success for this run.
+case "${PUBLISH_RESULT:-}" in
+  published)
+    ok "Backup complete and published."
+    ;;
+  rolled_back)
+    warn "The new backup generation was not restorable — the previous verified backup was kept live. Review backup-info.txt for what failed."
+    ;;
+  kept_unverified)
+    warn "Backup finished, but the new generation is not restorable and no previous backup existed to fall back to — restore would need --force-incomplete. Review backup-info.txt."
+    ;;
+  *)
+    warn "Backup finished with issues — see backup-info.txt."
+    ;;
+esac
 _lines_total="$(wc -l < "$BACKUP_MANIFEST" 2>/dev/null || echo 0)"
 echo "  Artifacts captured — see backup-info.txt for details."
 echo "  Mirror: ${MIRROR_STATUS} — BACKUP_DEST=${BACKUP_DEST:-<disabled>}, keeping ${BACKUP_KEEP} snapshot(s)."
-if [ "$_missing_count" -gt 0 ] || [ "$_incomplete_count" -gt 0 ]; then
-  echo "  NOTE: $_missing_count path(s) missing, $_incomplete_count incomplete — review backup-info.txt."
+if [ "$_missing_count" -gt 0 ] || [ "$_incomplete_count" -gt 0 ] || [ "$_missing_unit_count" -gt 0 ] || [ "$_failed_count" -gt 0 ]; then
+  echo "  NOTE: $_missing_count path(s) missing, $_incomplete_count incomplete, $_missing_unit_count service unit(s) missing, $_failed_count failed — review backup-info.txt."
 fi

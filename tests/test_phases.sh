@@ -202,6 +202,82 @@ fi
 # The arrays must be unchanged after the failed attempts.
 assert_eq "0" "${#APPS_ONLY[@]}" "no apps classified after die"
 
+# --- check_phase_conflicts (legacy-mode vs phase-filter contradictions) --------
+t_begin "check_phase_conflicts: no flags -> no warnings"
+reset_flags
+assert_eq "" "$(check_phase_conflicts 2>&1)" "silent with no flags"
+
+t_begin "check_phase_conflicts: warns when a legacy mode suppresses an --only phase"
+reset_flags
+PACKAGES_ONLY=1
+PHASES_ONLY=(dotfiles)
+_out="$(check_phase_conflicts 2>&1)"
+assert_str_contains "dotfiles" "$_out" "names the suppressed phase"
+assert_str_contains "suppressed" "$_out" "uses 'suppressed' wording"
+
+t_begin "check_phase_conflicts: ALL --only phases suppressed -> stronger warning"
+reset_flags
+CONFIGS_ONLY=1
+PHASES_ONLY=(base packages)
+_out="$(check_phase_conflicts 2>&1)"
+assert_str_contains "nothing will run" "$_out" "warns nothing will run"
+
+t_begin "check_phase_conflicts: partial suppression warns but stays usable"
+reset_flags
+CONFIGS_ONLY=1
+PHASES_ONLY=(base dotfiles)   # configs-only suppresses base, NOT dotfiles
+_out="$(check_phase_conflicts 2>&1)"
+assert_str_contains "base" "$_out" "warns base suppressed"
+assert_str_contains "suppressed by" "$_out" "partial-suppression wording"
+
+t_begin "check_phase_conflicts: warns when --from-phase is suppressed"
+reset_flags
+PACKAGES_ONLY=1
+PHASES_FROM="dotfiles"
+_out="$(check_phase_conflicts 2>&1)"
+assert_str_contains "dotfiles" "$_out" "names the suppressed resume point"
+assert_str_contains "may do nothing" "$_out" "may-do-nothing wording"
+
+t_begin "check_phase_conflicts: warns cause-neutrally when --from-phase suppresses an --only phase"
+reset_flags
+PHASES_FROM="services"
+PHASES_ONLY=(base)   # no legacy mode — suppression comes from --from-phase
+_out="$(check_phase_conflicts 2>&1)"
+assert_str_contains "base" "$_out" "names the suppressed phase"
+assert_str_contains "phase gating" "$_out" "cause-neutral wording (not 'legacy mode')"
+
+t_begin "check_phase_conflicts: compatible combos produce no warning"
+reset_flags
+CONFIGS_ONLY=1
+PHASES_ONLY=(dotfiles)        # configs-only does NOT suppress dotfiles
+assert_eq "" "$(check_phase_conflicts 2>&1)" "silent for compatible combo"
+
+t_begin "check_phase_conflicts: --from-phase + a runnable later --only phase is NOT a conflict"
+reset_flags
+PHASES_FROM="services"
+PHASES_ONLY=(dotfiles)        # dotfiles is after services and still runs
+assert_eq "" "$(check_phase_conflicts 2>&1)" "silent — the run still does something"
+
+t_begin "check_phase_conflicts: --from-phase with no runnable phase at/after it warns"
+reset_flags
+PHASES_FROM="services"
+PHASES_SKIP=(services dotfiles postinstall)   # everything at/after services is skipped
+_out="$(check_phase_conflicts 2>&1)"
+assert_str_contains "services" "$_out" "names the resume point"
+assert_str_contains "may do nothing" "$_out" "may-do-nothing wording"
+
+t_begin "check_phase_conflicts: no redundant from-phase warning after an --only all-suppressed warning"
+reset_flags
+PHASES_FROM="services"
+PHASES_ONLY=(base)            # the --only warning already says nothing will run
+_out="$(check_phase_conflicts 2>&1)"
+assert_str_contains "nothing will run" "$_out" "the --only all-suppressed warning fires"
+if printf '%s\n' "$_out" | grep -q "no phase at or after"; then
+  t_fail "redundant --from-phase warning emitted after the --only all-suppressed warning"
+else
+  t_pass "no redundant --from-phase warning"
+fi
+
 reset_flags
 
 t_summary

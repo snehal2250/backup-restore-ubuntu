@@ -63,7 +63,7 @@ else
 fi
 
 # --- 4. conflict_policy schema variants --------------------------------------
-t_begin "static: schema v3 accepts valid conflict_policy values, rejects invalid"
+t_begin "static: schema v4 accepts valid conflict_policy values, rejects invalid"
 if ! command -v yq >/dev/null 2>&1; then
   echo "  SKIP: yq not installed — policy-variant checks skipped"
 elif ! command -v python3 >/dev/null 2>&1 || ! python3 -c 'import jsonschema, yaml' >/dev/null 2>&1; then
@@ -84,6 +84,61 @@ else
     t_fail "invalid policy 'blowup' was accepted"
   else
     t_pass "invalid policy rejected"
+  fi
+  sandbox_cleanup
+fi
+
+t_begin "static: schema v4 accepts required/on_missing, rejects invalid values"
+if ! command -v yq >/dev/null 2>&1; then
+  echo "  SKIP: yq not installed — completeness-variant checks skipped"
+elif ! command -v python3 >/dev/null 2>&1 || ! python3 -c 'import jsonschema, yaml' >/dev/null 2>&1; then
+  echo "  SKIP: python3 + jsonschema + yaml not available"
+else
+  sandbox_new
+  cp "$REPO_ROOT/inventory/inventory.yaml" "$SANDBOX/inv.yaml"
+  # Valid values must pass.
+  yq -i '.apps[0].required = true | .apps[1].on_missing = "fail" | .services[0].required = true' "$SANDBOX/inv.yaml"
+  if python3 "$REPO_ROOT/lib/schema_check.py" "$REPO_ROOT/inventory/schema.yaml" "$SANDBOX/inv.yaml" >/dev/null 2>&1; then
+    t_pass "valid required/on_missing accepted"
+  else
+    t_fail "valid required/on_missing were rejected"
+  fi
+  # Invalid enum value must be rejected.
+  yq -i '.apps[0].on_missing = "bogus"' "$SANDBOX/inv.yaml"
+  if python3 "$REPO_ROOT/lib/schema_check.py" "$REPO_ROOT/inventory/schema.yaml" "$SANDBOX/inv.yaml" >/dev/null 2>&1; then
+    t_fail "invalid on_missing 'bogus' was accepted"
+  else
+    t_pass "invalid on_missing rejected"
+  fi
+  # Invalid type (string instead of boolean) must be rejected.
+  yq -i '.apps[0].on_missing = "warn" | .apps[0].required = "maybe"' "$SANDBOX/inv.yaml"
+  if python3 "$REPO_ROOT/lib/schema_check.py" "$REPO_ROOT/inventory/schema.yaml" "$SANDBOX/inv.yaml" >/dev/null 2>&1; then
+    t_fail "invalid required type (string) was accepted"
+  else
+    t_pass "invalid required type rejected"
+  fi
+  sandbox_cleanup
+fi
+
+t_begin "static: schema v3 inventories still validate during the v4 transition"
+if ! command -v python3 >/dev/null 2>&1 || ! python3 -c 'import jsonschema, yaml' >/dev/null 2>&1; then
+  echo "  SKIP: python3 + jsonschema + yaml not available"
+else
+  sandbox_new
+  cp "$REPO_ROOT/inventory/inventory.yaml" "$SANDBOX/inv.yaml"
+  # schema_version 3 (pre-v4) must remain valid — every v4 change is optional.
+  yq -i '.schema_version = 3' "$SANDBOX/inv.yaml"
+  if python3 "$REPO_ROOT/lib/schema_check.py" "$REPO_ROOT/inventory/schema.yaml" "$SANDBOX/inv.yaml" >/dev/null 2>&1; then
+    t_pass "schema_version 3 accepted (v4 transition)"
+  else
+    t_fail "schema_version 3 was rejected (v4 should accept 3 during the transition)"
+  fi
+  # Unknown versions must still be rejected.
+  yq -i '.schema_version = 5' "$SANDBOX/inv.yaml"
+  if python3 "$REPO_ROOT/lib/schema_check.py" "$REPO_ROOT/inventory/schema.yaml" "$SANDBOX/inv.yaml" >/dev/null 2>&1; then
+    t_fail "schema_version 5 was accepted"
+  else
+    t_pass "schema_version 5 rejected"
   fi
   sandbox_cleanup
 fi

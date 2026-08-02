@@ -15,6 +15,13 @@ set -euo pipefail
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$TEST_DIR/.." && pwd)"
 
+# Explicit opt-in for the path overrides (REPO_ROOT, BACKUPS_DIR, STAGE,
+# ARTIFACTS, BACKUP_LOCK, ...) used to sandbox backup.sh runs. Production
+# scripts only honor these overrides when this is set to 1 — see the guard in
+# lib/common.sh and backup.sh. Every test file sources this helper first, so
+# sandboxed child processes inherit it.
+export BRU_ALLOW_TEST_OVERRIDES=1
+
 TESTS_RUN=0
 TESTS_FAILED=0
 CURRENT_TEST=""

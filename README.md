@@ -90,7 +90,7 @@ Keep everything current day-to-day:
 | `./inventory.sh remove-app/-package/-service/-user-dir` | Remove a declaration | ✅ |
 | `./inventory.sh review` | Suggest undeclared apps found on the system | ✅ |
 | `./inventory.sh wizard` | Guided flow: scan the system, declare apps one by one | ✅ |
-| `./backup.sh` | Capture configs + service units + dotfiles + `user_dirs` → `backups/`, mirror to `BACKUP_DEST` (keep last `BACKUP_KEEP`); writes `status: ok` marker in `backup-info.txt` on success | ✅ |
+| `./backup.sh` | Capture configs + service units + dotfiles + `user_dirs` → `backups/`, mirror to `BACKUP_DEST` (keep last `BACKUP_KEEP`); writes a restorable `status:` (`ok`/`ok_with_warnings`) marker in `backup-info.txt` on success | ✅ |
 | `./restore.sh` | Fresh install + config restore (config from `backups/` or `--source <snapshot>`; base OS upgrade is opt-in: `--upgrade-base`; resumable/targeted via `--plan`, `--from-phase`, `--only`, `--skip`) | ⚠️ modifies system |
 | `./update_all_ubuntu.sh` | Update apt/snap/flatpak/npm + declared apps | ⚠️ modifies system |
 | `./schedule_cron.sh` | Install a @reboot scheduled backup | ⚠️ edits crontab |
@@ -122,10 +122,12 @@ The repo has a small automated test suite — plain bash, no extra dependencies:
 ```
 
 It covers the integrity (SHA256SUMS), rollback/journal/conflict-policy, manifest,
-and path helpers; the transactional backup guarantees (interrupted-backup
+path, and phase helpers; the transactional backup guarantees (interrupted-backup
 regression: staging-only `in_progress` marker, `publish_backup` success/rollback/
-fail-fast); and static guards (syntax, schema validation, no `rsync --delete` in
-production scripts). Sandboxes are git-ignored (`.test-tmp.*`).
+fail-fast); backup-completeness semantics (schema v4 `required:`/`on_missing:` →
+`failed`/`degraded`/`ok_with_warnings` manifests, restore refusal) against a fully
+sandboxed real `backup.sh`; and static guards (syntax, schema validation, no
+`rsync --delete` in production scripts). Sandboxes are git-ignored (`.test-tmp.*`).
 
 ## FAQ
 
@@ -152,10 +154,18 @@ History lives in the timestamped mirror snapshots in `BACKUP_DEST`, which are im
 once created.
 
 **What if some paths were missing during backup?** The run still **completes** and the
-file is written, but the manifest reports `status: degraded` instead of `status: ok`
-(per-artifact lines show which were `missing`/`incomplete`). `restore.sh` refuses degraded
-snapshots unless you pass `--force-incomplete`. `degraded` is NOT the same as an
-interrupted run — interrupted runs never publish a live manifest at all.
+file is written, but the manifest reports one of four statuses, derived from the
+per-artifact lines and the mirror state:
+
+- `ok` — every declared artifact captured, mirror ran.
+- `ok_with_warnings` — complete backup, but the mirror was not `ok` (disabled or failed) — restorable.
+- `degraded` — some **non-required** item is `missing`/`incomplete`/`missing-unit`;
+  `restore.sh` refuses unless you pass `--force-incomplete`.
+- `failed` — a **required** item (`required: true` / `on_missing: fail` on an app or
+  service) is missing; restore refuses by default.
+
+`degraded`/`failed` are NOT the same as an interrupted run — interrupted runs never
+publish a live manifest at all.
 
 **Is the backup content verified?** Every `backup.sh` run writes a `SHA256SUMS` file
 alongside the captured config (covering every payload file except the manifest and
@@ -170,9 +180,10 @@ only when `backups.staging/` and `backups/` share a filesystem — `backup.sh` v
 that (same device, including the live dir itself if it is a mountpoint) before moving
 anything. The live folder is renamed aside **first** and the run fails immediately if
 that fails: it never moves staging over an existing live folder. The previous generation
-is kept until the new one passes a final manifest check (`status: ok`); if the new
-generation is degraded, `backup.sh` rolls back to the previous one (restore refuses
-non-ok manifests, so a degraded live backup would be unusable). A cleanup trap removes
+is kept until the new one passes a final manifest check (restorable: `ok` or
+`ok_with_warnings`); if the new generation is degraded or failed, `backup.sh` rolls back
+to the previous one (restore refuses non-restorable manifests, so a degraded/failed live
+backup would be unusable). A cleanup trap removes
 leftovers from crashed runs and restores the previous generation if a signal interrupts
 the run before verification completes. If you need stronger crash consistency, fsync'ing
 the directory after the swap is an optional extra — it is not done by default.
@@ -211,16 +222,16 @@ are never touched.
 service.
 
 **How do I know the last backup succeeded?** `backup.sh` writes `backups/backup-info.txt`
-with run metadata and a success marker **only when the whole run completes** (a single
+with run metadata and a `status:` marker **only when the whole run completes** (a single
 atomic write — no mid-run truncation window). A missing or status-absent file means the
-last run did not complete. The marker includes `status: ok`, a `finished:` timestamp, and
-a `mirror:` line (`ok` / `failed` / `disabled`):
+last run did not complete. The marker reports `ok` / `ok_with_warnings` / `degraded` /
+`failed`, a `finished:` timestamp, and a `mirror:` line (`ok` / `failed` / `disabled`):
 
 ```bash
-# local truth (file exists with 'status: ok' = last run completed):
-tail -5 backups/backup-info.txt      # expect a 'status: ok' line
-# quick yes/no:
-grep -q '^status: ok' backups/backup-info.txt && echo 'BACKUP OK' || echo 'BACKUP INCOMPLETE'
+# local truth (file exists with a restorable status = last run completed):
+tail -5 backups/backup-info.txt      # expect 'status: ok' (or 'ok_with_warnings')
+# quick yes/no (restorable = ok or ok_with_warnings):
+grep -Eq '^status: (ok|ok_with_warnings)$' backups/backup-info.txt && echo 'BACKUP OK' || echo 'BACKUP NOT RESTORABLE'
 
 # off-machine truth (the newest mirror snapshot carries the same file):
 newest=$(ls -1dr /media/vikram-athare/Storage/backup-restore-ubuntu/backup-* | head -1)
@@ -232,20 +243,28 @@ tail -5 "$newest/backup-info.txt"
 | `backup-info.txt` | Meaning | What to do |
 | --- | --- | --- |
 | `status: ok` + `mirror: ok` | Run completed **and** off-machine copy is in place | nothing |
-| `status: ok` + `mirror: failed` | Config captured, but the off-machine copy **failed** | fix `BACKUP_DEST` (disk mounted? writable?) and re-run `./backup.sh` |
-| `status: ok` + `mirror: disabled` | Run completed; no off-machine copy (`BACKUP_DEST` unset) | nothing — expected if mirror is intentionally off |
-| `status: degraded` | Run **completed** but some declared paths were missing/incomplete; the file exists | review `backup-info.txt` for which artifacts degraded; fix the cause (permissions? removed config?) and re-run — restore needs `--force-incomplete` otherwise |
+| `status: ok_with_warnings` + `mirror: failed` | Config captured, but the off-machine copy **failed** | fix `BACKUP_DEST` (disk mounted? writable?) and re-run `./backup.sh` |
+| `status: ok_with_warnings` + `mirror: disabled` | Run completed; no off-machine copy (`BACKUP_DEST` unset) | nothing — expected if mirror is intentionally off |
+| `status: degraded` | Run **completed** but some non-required declared paths were missing/incomplete; the file exists | review `backup-info.txt` for which artifacts degraded; fix the cause (permissions? removed config?) and re-run — restore needs `--force-incomplete` otherwise |
+| `status: failed` | A **required** item (`required: true` / `on_missing: fail`) is missing | fix the declared paths on the source machine and re-run `./backup.sh`; restore refuses unless `--force-incomplete` |
 | no `backup-info.txt` / no `status` line | **No completed, verified run exists** (a completed run always writes the file atomically) | check the run output/log for the error and re-run |
 
 > **Local vs. snapshot marker:** `backups/backup-info.txt` reflects the last **completed,
 > verified** publication. `backup.sh` never touches it mid-run — the `in_progress` marker
 > is written to the staging manifest (`backups.staging/backup-info.txt`) instead — and it
 > is replaced atomically only when a run finishes successfully. So a run that aborts
-> during capture leaves the previous `status: ok` marker (and backup) in place; a missing
+> during capture leaves the previous restorable marker (and backup) in place; a missing
 > local file means no completed run exists (or the run died exactly inside the atomic
 > swap). The newest mirror snapshot only receives the marker on a successful run — check
 > the **local** file for the latest run's truth, then verify the snapshot you restore
 > from carries a matching marker.
+>
+> **Snapshot authority:** the newest mirror snapshot is **not** automatically the last
+> successful backup. Because publication rolls back a degraded/failed generation to the
+> previous one, a snapshot can exist that is *newer* than the local live backup while the
+> local one remains the restorable truth — and a snapshot itself can carry
+> `degraded`/`failed`. Judge every snapshot **on its own manifest**, never by its
+> timestamp: `tail -5 <snapshot>/backup-info.txt` before restoring from it.
 
 **Is `backups/` committed?** No — it's git-ignored (config can contain secrets).
 `backup.sh` automatically mirrors the whole folder (no filtering) to the local disk at

@@ -55,6 +55,29 @@ _final_out="$(manifest_final RUN-2 ok "$ARTIFACTS")"
 assert_str_contains "status: degraded" "$_final_out"
 assert_str_contains "apps/b/missing" "$_final_out"
 
+t_begin "manifest_final: all captured + mirror ok -> ok, zero warnings/failures"
+printf 'apps/a/captured\ndotfiles/.bashrc/captured\n' > "$ARTIFACTS"
+_final_out="$(manifest_final RUN-3 ok "$ARTIFACTS")"
+assert_str_contains "status: ok" "$_final_out"
+assert_str_contains "failures: 0" "$_final_out"
+assert_str_contains "warnings: 0" "$_final_out"
+assert_str_contains "artifact_counts: captured=2" "$_final_out"
+
+t_begin "manifest_final: all captured + mirror disabled -> ok_with_warnings"
+printf 'apps/a/captured\ndotfiles/.bashrc/captured\n' > "$ARTIFACTS"
+_final_out="$(manifest_final RUN-4 disabled "$ARTIFACTS")"
+assert_str_contains "status: ok_with_warnings" "$_final_out"
+assert_str_contains "warnings: 1" "$_final_out"
+assert_str_contains "failures: 0" "$_final_out"
+
+t_begin "manifest_final: required item failed -> status failed with failure count"
+printf 'apps/a/captured\napps/req/failed\n' > "$ARTIFACTS"
+_final_out="$(manifest_final RUN-5 ok "$ARTIFACTS")"
+assert_str_contains "status: failed" "$_final_out"
+assert_str_contains "failures: 1" "$_final_out"
+assert_str_contains "artifact_counts: captured=1" "$_final_out"
+assert_str_contains "failed=1" "$_final_out"
+
 t_begin "manifest_verify_restorable: ok manifest accepted"
 printf 'status: ok\n---\napps/a/captured\n' > "$LIVE/backup-info.txt"
 assert_ok manifest_verify_restorable "$LIVE/backup-info.txt"
@@ -65,6 +88,18 @@ assert_fail manifest_verify_restorable "$LIVE/backup-info.txt"
 
 t_begin "manifest_verify_restorable: degraded refused"
 printf 'status: degraded\n---\napps/a/missing\n' > "$LIVE/backup-info.txt"
+assert_fail manifest_verify_restorable "$LIVE/backup-info.txt"
+
+t_begin "manifest_verify_restorable: ok_with_warnings accepted"
+printf 'status: ok_with_warnings\nwarnings: 1\nfailures: 0\n---\napps/a/captured\n' > "$LIVE/backup-info.txt"
+assert_ok manifest_verify_restorable "$LIVE/backup-info.txt"
+
+t_begin "manifest_verify_restorable: failed refused (required item missing)"
+printf 'status: failed\nfailures: 1\n---\napps/req/failed\n' > "$LIVE/backup-info.txt"
+assert_fail manifest_verify_restorable "$LIVE/backup-info.txt"
+
+t_begin "manifest_verify_restorable: invalid status refused"
+printf 'status: bogus\n---\napps/a/captured\n' > "$LIVE/backup-info.txt"
 assert_fail manifest_verify_restorable "$LIVE/backup-info.txt"
 
 t_begin "manifest_verify_restorable: ok but no artifact list refused"

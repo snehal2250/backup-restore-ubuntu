@@ -39,5 +39,31 @@ assert_ok validate_path_contained "~/.config/app" "$HOME"
 assert_fail validate_path_contained "/etc" "$HOME"
 assert_fail validate_path_contained "../etc" "$HOME"
 
+t_begin "require_safe_dir: rejects empty, /, ., .. and resolves-to-/ paths"
+assert_fail require_safe_dir STAGE ""
+assert_fail require_safe_dir STAGE "/"
+assert_fail require_safe_dir STAGE "."
+assert_fail require_safe_dir STAGE ".."
+assert_fail require_safe_dir STAGE "/tmp/.."      # realpath -m -> /
+assert_ok require_safe_dir STAGE "$SANDBOX/backups"
+assert_ok require_safe_dir STAGE "/tmp/backup-restore-ubuntu-staging"
+
+t_begin "require_contained_dir: contained under the root accepted, escaping rejected"
+assert_ok require_contained_dir STAGE "$SANDBOX/backups" "$SANDBOX"
+assert_ok require_contained_dir STAGE "$SANDBOX" "$SANDBOX"            # equal to root
+assert_ok require_contained_dir STAGE "$SANDBOX/sub/deep/path" "$SANDBOX"
+assert_fail require_contained_dir STAGE "$SANDBOX/../escape" "$SANDBOX"
+assert_fail require_contained_dir STAGE "/etc" "$SANDBOX"
+assert_fail require_contained_dir STAGE "/" "$SANDBOX"
+assert_fail require_contained_dir STAGE "" "$SANDBOX"
+assert_fail require_contained_dir STAGE "/tmp/.." "$SANDBOX"            # resolves to /
+assert_fail require_contained_dir STAGE "$SANDBOX/backups" "/"          # root itself unsafe
+
+t_begin "require_contained_dir: a symlink escaping the root is rejected"
+ln -sfn "$REPO_ROOT/tests" "$SANDBOX/link-out"   # exists + points outside the sandbox
+assert_fail require_contained_dir STAGE "$SANDBOX/link-out" "$SANDBOX"
+assert_ok require_contained_dir STAGE "$SANDBOX/link-out" "$REPO_ROOT"   # fine under the real repo root
+rm -f "$SANDBOX/link-out"
+
 sandbox_cleanup
 t_summary

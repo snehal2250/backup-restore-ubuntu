@@ -22,7 +22,12 @@
 #     Unlike app config_paths these are user DATA, not app config — backed up whole.
 #   * snap_packages supports the suffix ':classic' (e.g. code:classic)
 #   * apps:      EVERY app carries a structured `installer:` block — a typed,
-#     parameterized record (NO free-form shell). The install method is
+#     parameterized record (NO free-form shell). Optional completeness
+#     policies per app/service: `required: true` or `on_missing: fail` make a
+#     missing item a hard backup failure (overall status 'failed'); the
+#     default `on_missing: warn` degrades the backup instead. The policies
+#     apply only to DECLARED paths — an app with no config_paths is recorded
+#     'empty' (informational), never 'failed'. The install method is
 #     `installer.type` in:
 #       apt | snap | snap_classic | flatpak | npm_global | pipx | cargo |
 #       apt_repository | deb | tarball | script
@@ -44,7 +49,7 @@
 #   * services:  only CUSTOM services the user installed; target system|user
 # =============================================================================
 
-schema_version: 3 # must match inventory/schema.yaml (bump both together)
+schema_version: 4 # must match inventory/schema.yaml (bump both together); 3 still validates during the transition
 profile: workstation # machine profile, validated against the schema
 default_shell: /usr/bin/fish
 apt_packages: []
