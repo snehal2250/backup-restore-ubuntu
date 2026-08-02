@@ -37,7 +37,7 @@ The highest-priority issue is that the current backup flow can overwrite the pre
 | P1 — Replace arbitrary install commands with structured installers | ✅ completed |
 | P1 — Add a strict inventory schema and semantic validation | ✅ completed |
 | P1 — Separate configuration, state, data, cache, and secrets | 🚧 in-progress |
-| P1 — Define restore conflict policies | 🚧 in-progress |
+| P1 — Define restore conflict policies | ✅ completed |
 | P1 — Introduce explicit restore phases and resumability | 🚧 in-progress |
 | P1 — Improve backup completeness semantics | 🚧 in-progress |
 | P1 — Add integrity verification for backup contents | ✅ completed |
@@ -237,9 +237,9 @@ Recommended classes:
 
 Add a pre-backup scanner that warns about likely credentials, private keys, browser profiles, cloud tokens, and socket files. Do not print secret contents.
 
-### P1 — Define restore conflict policies — 🚧 in-progress
+### P1 — Define restore conflict policies — ✅ completed
 
-**Status:** 🚧 in-progress — the "merge" policy is effectively implemented as the global **additive overlay** (restore never deletes target files; README documents it). Not implemented: per-path `merge`/`replace`/`skip-existing`/`prompt` declarations, the timestamped rollback bundle, and the restore journal. (The proposed `three-way` merge is a future option — not-required.)
+**Status:** ✅ completed (2026-08-02) — per-owner `conflict_policy` (apps and services, schema v3): `merge` (default, the historical additive overlay) / `replace` (preserve into the rollback bundle, then exact mirror with `--delete`) / `skip-existing` (`--ignore-existing`) / `prompt` (per path, non-interactive skips). Every config restore captures what it overwrites into a timestamped rollback bundle under `~/.local/state/backup-restore-ubuntu/rollback-<ts>/` (outside the backup source) and appends one line per operation to its `restore-journal.log` (created/replaced/skipped/failed). Dry-runs create nothing; user-dirs stay merge-only (never delete user data). (The proposed `three-way` merge remains a future option — not-required.)
 
 A fresh installation can still create default files before restoration. Each path should declare one of:
 
@@ -481,7 +481,7 @@ backup-restore-ubuntu/
 2. ⬜ pending — Add regression tests for interrupted backup and previous-generation preservation (folded into the P2 Testing item).
 3. ✅ done — Add explicit `--source` snapshot selection and preflight verification (2026-08-02).
 4. ✅ done — Add checksums and hostile-file/symlink validation (P1 integrity).
-5. 🚧 partial — Add restore journal, conflict policies, and resumable phases (global merge overlay exists; per-path policies, journal, and phase flags missing).
+5. 🚧 partial — Add restore journal, conflict policies, and resumable phases (conflict policies + rollback bundle + journal done 2026-08-02; the resumable-phase flags `--plan`/`--from-phase`/`--only`/`--skip` are still pending).
 6. ✅ done — Introduce schema versioning and strict inventory validation.
 7. ✅ done — Replace opaque custom commands incrementally with typed installers.
 8. ⬜ pending — Add secret classification and encrypted-secret guidance.

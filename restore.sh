@@ -276,17 +276,95 @@ fi
 # --- Phase 3: apps --------------------------------------------------------
 info "Phase 3/5: apps"
 
+# restore_config_tree OWNER POLICY SRC DEST RBREL [SUDO...]
+# Apply one backed-up config tree to DEST honouring the owner's conflict
+# policy: merge (default, additive overlay), replace (preserve existing into
+# the rollback bundle, then mirror the backup exactly with --delete),
+# skip-existing (only missing files), prompt (ask per path; non-interactive
+# runs skip). Every run first captures what already exists into the rollback
+# bundle and journals created/replaced/skipped. SUDO... is a prefix for
+# root-owned targets.
+restore_config_tree() {
+  local owner="$1" policy="$2" src="$3" dest="$4" rb="$5"; shift 5
+  local -a sudo_prefix=("$@")
+  [ -d "$src" ] || return 0
+
+  # Rollback capture first: returns 1 if existing files would be overwritten.
+  local had_existing=0
+  if rollback_capture "$src" "$dest" "$rb" "${sudo_prefix[@]}"; then
+    had_existing=0
+  else
+    had_existing=1
+  fi
+
+  case "$policy" in
+    prompt)
+      if [ "$had_existing" = "1" ]; then
+        if [ "$ASSUME_YES" = "1" ] || [ "$DRY_RUN" = "1" ]; then
+          warn "  $owner: conflict_policy=prompt and target files exist — skipping (non-interactive)."
+          journal_log "skipped" "$rb"
+          return 0
+        fi
+        if confirm "  $owner: existing files under '$dest' — overwrite with the backup? (conflict_policy=prompt)" "n"; then
+          :
+        else
+          info "  $owner: skipped (prompt declined)"
+          journal_log "skipped" "$rb"
+          return 0
+        fi
+      fi
+      ;;
+  esac
+
+  local -a extra=()
+  case "$policy" in
+    skip-existing) extra+=(--ignore-existing) ;;
+  esac
+
+  # replace: remove ONLY the exact leaf counterparts the backup would restore
+  # (never siblings or parents — rsync --delete against $HOME or / would wipe
+  # unrelated data). The overwritten files were already preserved in the
+  # rollback bundle above.
+  if [ "$policy" = "replace" ]; then
+    local rel
+    while IFS= read -r rel; do
+      [ -n "$rel" ] || continue
+      [ -e "$dest/$rel" ] || continue
+      if [ "${#sudo_prefix[@]}" -gt 0 ]; then
+        run "${sudo_prefix[@]}" rm -rf "$dest/$rel"
+      else
+        run rm -rf "$dest/$rel"
+      fi
+    done < <(cd "$src" && find . \( -type f -o -type l \) | sed 's|^\./||')
+  fi
+
+  if [ "$policy" = "skip-existing" ] && [ "$had_existing" = "1" ]; then
+    journal_log "skipped" "$rb"
+  elif [ "$had_existing" = "1" ]; then
+    journal_log "replaced" "$rb"
+  else
+    journal_log "created" "$rb"
+  fi
+
+  if [ "${#sudo_prefix[@]}" -gt 0 ]; then
+    run "${sudo_prefix[@]}" rsync -a "${extra[@]}" "$src/" "$dest/"
+  else
+    run rsync -a "${extra[@]}" "$src/" "$dest/"
+  fi
+  ok "  $owner: config restored to $dest (conflict_policy=$policy)"
+}
+
 restore_app_config() {
   local name="$1"
   local dir="$BACKUPS_DIR/apps/$name"
   [ "$BACKUPS_VERIFIED" = "1" ] || return 0
+  local policy
+  policy="$(conflict_policy_get app "$name")"
   if [ -d "$dir/home" ]; then
-    run rsync -a "$dir/home/" "$HOME/"
-    ok "  $name: config restored to \$HOME"
+    restore_config_tree "$name" "$policy" "$dir/home" "$HOME" "apps/$name/home"
   fi
   if [ -d "$dir/root" ]; then
-    run sudo rsync -a "$dir/root/" /
-    ok "  $name: config restored to /"
+    restore_config_tree "$name" "$policy" "$dir/root" "/" "apps/$name/root" sudo
   fi
 }
 
@@ -390,7 +468,7 @@ done < <(yaml_list '.apps[] | .name')
 info "Phase 4/5: services"
 
 restore_services() {
-  local unit target enable start sdir dest
+  local unit target enable start sdir dest policy
   while IFS=$'\t' read -r unit target enable start; do
     [ -n "$unit" ] || continue
     [ "$target" = "user" ] || target="system"
@@ -402,23 +480,32 @@ restore_services() {
         if [ "$target" = "user" ]; then
           dest="$HOME/.config/systemd/user/$unit"
           run mkdir -p "$HOME/.config/systemd/user"
+          if rollback_capture "$sdir/unit" "$dest" "services/$unit/unit"; then
+            journal_log "created" "services/$unit/unit"
+          else
+            journal_log "replaced" "services/$unit/unit"
+          fi
           run cp "$sdir/unit" "$dest"
           run systemctl --user daemon-reload 2>/dev/null || warn "  $unit: could not reload user systemd (no user session?)."
         else
           dest="/etc/systemd/system/$unit"
+          if rollback_capture "$sdir/unit" "$dest" "services/$unit/unit" sudo; then
+            journal_log "created" "services/$unit/unit"
+          else
+            journal_log "replaced" "services/$unit/unit"
+          fi
           run sudo cp "$sdir/unit" "$dest"
           run sudo systemctl daemon-reload
         fi
         ok "  $unit: unit installed ($target)"
       fi
       if [ "$PACKAGES_ONLY" != "1" ]; then
+        policy="$(conflict_policy_get service "$unit")"
         if [ -d "$sdir/home" ]; then
-          run rsync -a "$sdir/home/" "$HOME/"
-          ok "  $unit: config restored to \$HOME"
+          restore_config_tree "$unit" "$policy" "$sdir/home" "$HOME" "services/$unit/home"
         fi
         if [ -d "$sdir/root" ]; then
-          run sudo rsync -a "$sdir/root/" /
-          ok "  $unit: config restored to /"
+          restore_config_tree "$unit" "$policy" "$sdir/root" "/" "services/$unit/root" sudo
         fi
       fi
       # Under --packages-only, do NOT enable/start services — they need
@@ -464,6 +551,11 @@ restore_dotfiles() {
       local dest_parent
       dest_parent="$(dirname "$HOME/$df")"
       run mkdir -p "$dest_parent"
+      if rollback_capture "$BACKUPS_DIR/dotfiles/$df" "$HOME/$df" "dotfiles/$df"; then
+        journal_log "created" "dotfiles/$df"
+      else
+        journal_log "replaced" "dotfiles/$df"
+      fi
       run cp "$BACKUPS_DIR/dotfiles/$df" "$HOME/$df"
       ok "  dotfile: $df"
     else
@@ -494,6 +586,11 @@ restore_user_dirs() {
     rel="${src#"$HOME"/}"
     if [ -d "$BACKUPS_DIR/user-dirs/$rel" ]; then
       run mkdir -p "$HOME/$rel"
+      if rollback_capture "$BACKUPS_DIR/user-dirs/$rel" "$HOME/$rel" "user-dirs/$rel"; then
+        journal_log "created" "user-dirs/$rel"
+      else
+        journal_log "replaced" "user-dirs/$rel"
+      fi
       run rsync -a "$BACKUPS_DIR/user-dirs/$rel/" "$HOME/$rel/"
       ok "  user dir: $d restored"
     else
@@ -595,6 +692,14 @@ if [ "$PACKAGES_ONLY" = "1" ] && [ "$BACKUPS_VERIFIED" = "1" ]; then
   echo
   echo "NOTE: --packages-only was used. Services were installed but NOT enabled/started."
   echo "Re-run without --packages-only to restore config and activate services."
+fi
+if [ -n "$ROLLBACK_DIR" ] && [ "$DRY_RUN" != "1" ]; then
+  echo
+  echo "Rollback bundle + restore journal:"
+  echo "  $ROLLBACK_DIR"
+  echo "  - journal: $ROLLBACK_DIR/restore-journal.log (created/replaced/skipped/failed)"
+  echo "  - undo:    copy captured files from the bundle back to their destinations"
+  echo "  - cleanup: rm -rf \"$ROLLBACK_DIR\" once you are satisfied"
 fi
 echo
 echo "Next steps:"

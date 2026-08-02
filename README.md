@@ -158,9 +158,20 @@ leftovers from crashed runs and restores the previous generation if a signal int
 the run before verification completes. If you need stronger crash consistency, fsync'ing
 the directory after the swap is an optional extra — it is not done by default.
 
-**Does restore delete config files I removed?** No. Restore is an **additive overlay** —
-it copies the captured config onto the fresh install and never deletes existing target
-files. To get a pristine config, delete the app's config dir before re-running restore.
+**Does restore delete config files I removed?** By default no — the app/service's
+`conflict_policy` (default `merge`) controls this: `merge` is an **additive overlay**
+that never deletes target files; `replace` mirrors the backup exactly (existing target
+files are first preserved in the rollback bundle, then `rsync --delete` runs);
+`skip-existing` restores only missing files; `prompt` asks per config path (non-interactive
+runs skip). To get a pristine config regardless, delete the app's config dir before
+re-running restore.
+
+**Can I undo a restore?** Yes. Every config restore first captures what it is about to
+overwrite into a timestamped rollback bundle at
+`~/.local/state/backup-restore-ubuntu/rollback-<timestamp>/`, and appends one line per
+operation to `restore-journal.log` there (created / replaced / skipped / failed). To undo,
+copy files back from the bundle to their destinations; remove the bundle once you are
+satisfied (`rm -rf`). Dry-runs create nothing.
 
 **Do services start before or after their config is restored?** After. `restore.sh`
 restores each service's `config_paths` before `enable`/`start`, so a service boots with

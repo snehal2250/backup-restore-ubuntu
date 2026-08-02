@@ -873,6 +873,115 @@ is_app_installed() {
   is_app_installed_by_source "$1"
 }
 
+# --- Restore conflict policies -------------------------------------------
+# Per-owner conflict policy (apps[]/services[]), default "merge" (additive
+# overlay, never deletes — the historical restore behavior).
+# conflict_policy_get KIND NAME -> the owner's policy ("merge" if absent).
+# KIND is 'app' (NAME = app name) or 'service' (NAME = unit file).
+conflict_policy_get() {
+  require_yq "$YQ_AUTO"
+  local kind="$1" owner="$2"
+  case "$kind" in
+    app)     N="$owner" yq -r ".apps[] | select(.name == strenv(N)) | .conflict_policy // \"merge\"" "$INVENTORY_FILE" ;;
+    service) U="$owner" yq -r ".services[] | select(.unit == strenv(U)) | .conflict_policy // \"merge\"" "$INVENTORY_FILE" ;;
+    *) echo "merge" ;;
+  esac
+}
+
+# --- Rollback bundle + restore journal ------------------------------------
+# Every config restore captures what it is about to overwrite into a
+# timestamped ROLLBACK_DIR under the user's XDG state dir (OUTSIDE the backup
+# source — the repo checkout and the backup medium stay pristine), and appends
+# one line per operation to $ROLLBACK_DIR/restore-journal.log
+# (actions: created | replaced | skipped | failed). The bundle is created
+# lazily on first capture, never under --dry-run, never when nothing is
+# restored. Dry-run prints the operations instead of executing them.
+ROLLBACK_DIR=""
+
+# rollback_init: create the bundle dir + journal header (dry-run aware).
+rollback_init() {
+  if [ "$DRY_RUN" = "1" ]; then
+    printf '[dry-run] rollback bundle + journal would be created at %s\n' "$HOME/.local/state/backup-restore-ubuntu/rollback-<timestamp>"
+    return 0
+  fi
+  [ -n "$ROLLBACK_DIR" ] && return 0
+  ROLLBACK_DIR="$HOME/.local/state/backup-restore-ubuntu/rollback-$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$ROLLBACK_DIR"
+  {
+    echo "# restore journal — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "# source: ${BACKUP_MANIFEST:-unknown}"
+    echo "# rollback bundle: $ROLLBACK_DIR"
+    echo "# actions: created | replaced | skipped | failed"
+  } > "$ROLLBACK_DIR/restore-journal.log"
+  info "Rollback bundle + journal: $ROLLBACK_DIR"
+}
+
+# journal_log ACTION PATH — append one journal line (dry-run aware).
+journal_log() {
+  local action="$1" path="$2"
+  if [ "$DRY_RUN" = "1" ]; then
+    printf '[dry-run] journal: %s %s\n' "$action" "$path"
+    return 0
+  fi
+  [ -n "$ROLLBACK_DIR" ] || return 0
+  printf '%s %s %s\n' "$(date -u +%H:%M:%S)" "$action" "$path" >> "$ROLLBACK_DIR/restore-journal.log"
+}
+
+# rollback_capture SRC DEST RBREL [sudo...]
+# Capture what restore is about to overwrite into $ROLLBACK_DIR/RBREL.
+#   * SRC is a FILE (unit files, dotfiles): capture DEST itself if it exists.
+#   * SRC is a DIR (config trees): for every file/symlink under SRC, capture
+#     DEST/<rel> if it exists (rsync -R from DEST, so structure is preserved).
+# Optional trailing args are a sudo prefix for root-owned destinations.
+# Returns 1 if anything existing was captured (i.e. files would be
+# overwritten), 0 otherwise. Dry-run aware.
+rollback_capture() {
+  local src="$1" dest="$2" rb="$3"; shift 3
+  local -a sudo_prefix=("$@")
+
+  # Single-file capture.
+  if [ -f "$src" ]; then
+    [ -e "$dest" ] || return 0
+    if [ "$DRY_RUN" = "1" ]; then
+      printf '[dry-run] rollback: cp -a %s -> %s\n' "$dest" "$HOME/.local/state/backup-restore-ubuntu/rollback-<timestamp>/$rb"
+      return 1
+    fi
+    rollback_init
+    mkdir -p "$ROLLBACK_DIR/$(dirname "$rb")"
+    if [ "${#sudo_prefix[@]}" -gt 0 ]; then
+      "${sudo_prefix[@]}" cp -a "$dest" "$ROLLBACK_DIR/$rb" 2>/dev/null || warn "  rollback: could not capture $dest"
+    else
+      cp -a "$dest" "$ROLLBACK_DIR/$rb" 2>/dev/null || warn "  rollback: could not capture $dest"
+    fi
+    return 1
+  fi
+
+  # Tree capture.
+  [ -d "$src" ] || return 0
+  local found=0 rel
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    [ -e "$dest/$rel" ] || continue
+    if [ "$DRY_RUN" = "1" ]; then
+      printf '[dry-run] rollback: %s ./%s -> %s\n' "${sudo_prefix[*]:-}" "$rel" "$HOME/.local/state/backup-restore-ubuntu/rollback-<timestamp>/$rb"
+      found=1
+      continue
+    fi
+    rollback_init
+    # rsync -aR does not create the nested destination dirs itself — ensure
+    # the bundle path exists before capturing.
+    mkdir -p "$ROLLBACK_DIR/$rb"
+    if [ "${#sudo_prefix[@]}" -gt 0 ]; then
+      ( cd "$dest" && "${sudo_prefix[@]}" rsync -aR "./$rel" "$ROLLBACK_DIR/$rb/" ) 2>/dev/null || warn "  rollback: could not capture $dest/$rel"
+    else
+      ( cd "$dest" && rsync -aR "./$rel" "$ROLLBACK_DIR/$rb/" ) 2>/dev/null || warn "  rollback: could not capture $dest/$rel"
+    fi
+    found=1
+  done < <(cd "$src" && find . \( -type f -o -type l \) | sed 's|^\./||')
+  [ "$found" = "1" ] && return 1
+  return 0
+}
+
 # --- Backup content integrity (SHA256SUMS) --------------------------------
 # backup_generate_checksums DIR — write a deterministic SHA256SUMS over every
 # regular file under DIR except the checksum file itself, the manifest

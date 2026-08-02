@@ -103,6 +103,12 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   socket), escaping symlinks, and missing/extra-file reporting. Legacy snapshots without
   `SHA256SUMS` warn and proceed; a failed check refuses the restore unless
   `--force-incomplete`.
+- ✅ Restore conflict policies + rollback bundle + journal (P1, schema v3): per-owner
+  `conflict_policy` (`merge` default / `replace` / `skip-existing` / `prompt`) on apps
+  and services; every config restore first captures what it overwrites into a
+  timestamped rollback bundle under `~/.local/state/backup-restore-ubuntu/rollback-<ts>/`
+  (outside the backup source) and journals created/replaced/skipped/failed. `--dry-run`
+  creates nothing; user-dirs stay merge-only (never delete user data).
 - ⬜ Run `shellcheck` on all updated scripts.
 
 ## Commit strategy

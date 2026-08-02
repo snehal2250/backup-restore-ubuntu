@@ -37,14 +37,15 @@
 #                extensions: optional list of extension/model IDs to re-install AFTER restore
 #                  (VS Code extensions via 'code --install-extension', Azure CLI via
 #                  'az extension add', Ollama models via 'ollama pull'). IDs only — no versions.
+#                conflict_policy: optional merge|replace|skip-existing|prompt (default merge)
+#                  — how restore applies this app's config when the target already has files
 #                default_shell: optional (top-level), the login shell to set via chsh
 #                  (e.g. /usr/bin/fish). The shell package must be declared as an app.
 #   * services:  only CUSTOM services the user installed; target system|user
 # =============================================================================
 
-schema_version: 2          # must match inventory/schema.yaml (bump both together)
-profile: workstation       # machine profile, validated against the schema
-
+schema_version: 3 # must match inventory/schema.yaml (bump both together)
+profile: workstation # machine profile, validated against the schema
 default_shell: /usr/bin/fish
 apt_packages: []
 snap_packages: []
@@ -94,6 +95,7 @@ apps:
     config_paths:
       - "~/.gitconfig"
       - "~/.config/git"
+    conflict_policy: replace
   - name: "gh"
     description: "GitHub CLI (official apt repo)"
     installer:
@@ -201,7 +203,7 @@ apps:
       - "GPUPersistentCache"
       - "Crashpad"
       - "GPUCache"
-      - "Singleton*"   # runtime singletons (SingletonSocket/Lock/Cookie) while Chrome runs
+      - "Singleton*" # runtime singletons (SingletonSocket/Lock/Cookie) while Chrome runs
   - name: "fish"
     description: "Friendly interactive shell (official apt)"
     installer:
@@ -285,6 +287,7 @@ apps:
     check_cmd: "tmux"
     config_paths:
       - "~/.tmux.conf"
+    conflict_policy: skip-existing
   - name: "terraform"
     description: "HashiCorp Terraform IaC CLI"
     installer:

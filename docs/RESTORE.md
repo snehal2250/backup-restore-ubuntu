@@ -250,11 +250,17 @@ on first start.
 Declare them with `./inventory.sh add-user-dir ~/Documents`; `backup.sh` captures them
 in full (they are user data, not app config).
 
-**Config restore is an additive overlay.** `restore.sh` copies the captured files onto
-the target and **never deletes** existing target files — a config file that no longer
-exists in the backup is not removed from the restored machine (deliberate: restore must
-never delete data; history lives in the immutable `BACKUP_DEST` snapshots). If you want
-a pristine config, delete the app's config dir before re-running restore.
+**Config restore honours conflict policies, with a rollback bundle + journal.** Each
+app/service may declare `conflict_policy` (default `merge`): `merge` = additive overlay,
+never deletes (a config file that no longer exists in the backup is not removed —
+deliberate: restore must never delete data); `replace` = preserve existing into the
+rollback bundle, then mirror the backup exactly (`rsync --delete`); `skip-existing` =
+restore only missing files; `prompt` = ask per config path (non-interactive runs skip).
+Before any overwrite, restore captures what exists into a timestamped rollback bundle at
+`~/.local/state/backup-restore-ubuntu/rollback-<timestamp>/` (OUTSIDE the backup source)
+and appends one line per operation to its `restore-journal.log`
+(created/replaced/skipped/failed). The bundle path is printed at the end of the run —
+copy files back from it to undo, `rm -rf` it once satisfied. `--dry-run` creates nothing.
 
 Two failure behaviors, by design:
 
@@ -277,6 +283,8 @@ Two failure behaviors, by design:
 ```bash
 # 1. Review the output for warnings you should act on
 #    (failed script installers, missing unit files, skipped configs...)
+# 1b. The run printed a rollback bundle path — keep it until you have verified the
+#     machine, then review its restore-journal.log and rm -rf the bundle when satisfied.
 
 # 2. Verify a few apps launched/CLI commands work:
 code --version          # vs code
@@ -529,6 +537,7 @@ snapshot.
 | `unsupported architecture` / `unsupported Ubuntu release` | This repo hard-blocks platforms outside `SUPPORTED_ARCHS`/`SUPPORTED_UBUNTU_RELEASES` (amd64/arm64, Ubuntu 22.04/24.04). Use a supported machine or extend the constants in `lib/common.sh`. |
 | `No backups/ found — configuration cannot be restored` | You skipped step 2.3. Copy the newest snapshot into `backups/`, or just pass `--source "$newest"` (§ 2.3 alternative) and re-run. |
 | `Backup content integrity check FAILED` | The snapshot's `SHA256SUMS` doesn't match its files — corruption, a partial copy, or tampering. Re-run `./backup.sh` and bring a fresh snapshot; use `--force-incomplete` only if you accept the risk. |
+| "Where did my pre-restore config go?" | Every overwrite is captured first into the rollback bundle `~/.local/state/backup-restore-ubuntu/rollback-<timestamp>/` (path printed at the end of the restore run; journal in `restore-journal.log`). Copy files back to undo, `rm -rf` the bundle once satisfied. |
 | `Backup source not found: ...` | `--source` pointed at a nonexistent path, or at a mirror *root* (a folder of `backup-*` snapshots) instead of a single snapshot. Pass a snapshot directory that contains `backup-info.txt` (the error prints the newest snapshot to use). |
 | `Backup was created on architecture '...' but this machine is '...'` | The `--source` snapshot was made on a different CPU architecture — restore refuses incompatible config by design. Make a backup on this machine's architecture and re-run. |
 | `no unit file in backups/ — skipping` | The service's unit file wasn't captured. Run `./backup.sh` on your working machine, re-copy `backups/`, re-run. |

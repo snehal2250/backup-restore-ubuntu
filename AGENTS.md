@@ -192,6 +192,8 @@ apps:                          # one entry per MAIN app
       - some-extension         # VS Code -> code --install-extension
                                # Azure CLI -> az extension add
                                # Ollama -> ollama pull
+    conflict_policy: merge     # optional: how restore applies config when the target
+                               # already has files (merge|replace|skip-existing|prompt)
 
 services:                      # only CUSTOM services the user installed
   - unit: myservice.service
@@ -246,6 +248,15 @@ Rules for agents editing the inventory:
 - A custom service's runtime files belong in that service's `config_paths` (or the relevant
   app's `config_paths`). They are never auto-inferred from the unit file alone.
 - Do not add dependencies as separate entries (principle 4).
+- `conflict_policy` (optional, apps and services; default `merge`) controls how restore
+  applies that owner's config when the target already has files: `merge` = additive
+  overlay, never deletes; `replace` = preserve existing into the rollback bundle, then
+  mirror the backup exactly (`rsync --delete`); `skip-existing` = restore only missing
+  files; `prompt` = ask per config path (non-interactive runs skip). Every config restore
+  first captures what it is about to overwrite into a timestamped rollback bundle under
+  `~/.local/state/backup-restore-ubuntu/rollback-<ts>/` with a `restore-journal.log`
+  (created/replaced/skipped/failed); `--dry-run` creates nothing. The bundle lives
+  OUTSIDE the backup source so the repo checkout and backup medium stay pristine.
 
 ## 6. Standard workflows
 
@@ -291,8 +302,11 @@ one that does not report `status: ok`, means the last completed run did not succ
 ./restore.sh --packages-only        # install fresh only (skip config + services)
 ./restore.sh --force-incomplete     # restore even from an incomplete backup
 ```
-Restore validates the backup manifest (requires `status: ok`) before restoring config.
-Under `--packages-only`, services are installed but NOT enabled/started. Restore exits
+Restore validates the backup manifest (requires `status: ok`) and the SHA256SUMS content
+check before restoring config. Config is applied per the owner's `conflict_policy`
+(default `merge`), and every overwrite is first captured into a timestamped rollback
+bundle + restore journal (printed at the end of the run). Under `--packages-only`,
+services are installed but NOT enabled/started. Restore exits
 nonzero if any required item failed.
 
 **Post-restore** — groups, default shell, app extensions/models are applied:
@@ -323,7 +337,9 @@ nonzero if any required item failed.
   `app_get`, `installer_get`/`installer_list`/`installer_has`, `expand_path`,
   `normalize_path`, `validate_path_contained`, `require_schema_validator`,
   `validate_schema_structure`, `validate_inventory`, `manifest_in_progress`,
-  `manifest_final`, `manifest_verify_restorable`,
+  `manifest_final`, `manifest_verify_restorable`, `conflict_policy_get`,
+  `rollback_init`/`rollback_capture`/`journal_log` (per-owner conflict policies,
+  rollback bundle + restore journal),
   `backup_generate_checksums`/`backup_verify_integrity` (SHA256SUMS content integrity:
   generated over the staged payload by `backup.sh`, verified by `restore.sh` before any
   config restore — hostile special files, escaping symlinks, missing/corrupt files,

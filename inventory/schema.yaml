@@ -20,6 +20,13 @@
 # flatpak, npm_global, pipx, cargo, apt_repository, deb, tarball, script)
 # instead of free-form shell pipelines.
 #
+# v3 changes: apps and services may declare an optional `conflict_policy`
+# (merge | replace | skip-existing | prompt, default merge) that controls how
+# restore applies their config when the target already has files, and every
+# config restore now creates a timestamped rollback bundle + restore journal
+# (see docs/RESTORE.md). Optional and backward compatible — existing
+# inventories without the key behave exactly as before.
+#
 # Semantic rules that a schema cannot express — unique app/service names,
 # default_shell provided by a declared package, overlapping path ownership,
 # config nested under an excluded path, {version} URL template completeness,
@@ -27,8 +34,8 @@
 # lib/common.sh. This file is structure only.
 # =============================================================================
 $schema: "https://json-schema.org/draft/2020-12/schema"
-$id: "https://backup-restore-ubuntu.local/schema/inventory-v2"
-title: "Backup-Restore-Ubuntu inventory schema (v2)"
+$id: "https://backup-restore-ubuntu.local/schema/inventory-v3"
+title: "Backup-Restore-Ubuntu inventory schema (v3)"
 description: "Structural contract for inventory/inventory.yaml, profile: workstation."
 
 type: object
@@ -50,7 +57,7 @@ required:
 
 properties:
   schema_version:
-    const: 2
+    const: 3
     description: "Must equal the version implemented by this schema file."
   profile:
     enum:
@@ -147,6 +154,10 @@ $defs:
           type: string
           pattern: "^[a-zA-Z0-9][a-zA-Z0-9._@-]*$"
         description: "Extension/model IDs to re-install after restore (VS Code, az, ollama)."
+      conflict_policy:
+        enum: [merge, replace, skip-existing, prompt]
+        default: merge
+        description: "How restore applies this app's config when the target already has files: merge = additive overlay, never deletes (default); replace = preserve existing into the rollback bundle, then mirror the backup exactly (rsync --delete); skip-existing = restore only missing files; prompt = ask per config path (non-interactive runs skip)."
 
   installer:
     type: object
@@ -412,3 +423,7 @@ $defs:
           type: string
           pattern: "^(?!.*\\.\\.)(~|~/[^\\x00-\\x1f]*|/[^\\x00-\\x1f]*)$"
         description: "Exactly '~', '~/...', or an absolute '/...' path; never '~foo' or '..'. NOTE: a lone '~' must be QUOTED as \"~\" in YAML."
+      conflict_policy:
+        enum: [merge, replace, skip-existing, prompt]
+        default: merge
+        description: "How restore applies this service's config when the target already has files (same semantics as the app-level key; the unit file itself is always replaced)."
