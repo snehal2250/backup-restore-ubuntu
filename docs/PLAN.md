@@ -91,6 +91,18 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   with the screen lock disabled (a locked GUI mid-restore corrupts the package state).
 - ✅ Test `--dry-run` output is accurate end-to-end (verified by the rehearsal dry-run,
   which matched the real install commands until the run was interrupted).
+- ✅ `restore.sh --source <snapshot>` — external backup snapshot as a **first-class
+  restore input** (P0 from the improvement analysis): `realpath` resolution, requires a
+  verified manifest + artifact list (`status: ok`; `--force-incomplete` to override),
+  architecture / Ubuntu-release / inventory-SHA compatibility checks, writable-source
+  warning, and prints the exact source before any system change. No implicit copy or
+  mount — the repo checkout is disposable, the backup medium is authoritative.
+- ✅ Backup content integrity (P1): `backup.sh` writes a deterministic `SHA256SUMS` over
+  the staged payload (excluding the manifest and mutable logs); `restore.sh` verifies it
+  before any config restore — checksum matches, hostile special files (device/FIFO/
+  socket), escaping symlinks, and missing/extra-file reporting. Legacy snapshots without
+  `SHA256SUMS` warn and proceed; a failed check refuses the restore unless
+  `--force-incomplete`.
 - ⬜ Run `shellcheck` on all updated scripts.
 
 ## Commit strategy

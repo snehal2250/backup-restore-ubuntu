@@ -31,8 +31,8 @@ copying of the OS itself.
 > - `inventory.sh` and `backup.sh` will offer to install `yq` and the validator
 >   (`sudo snap install yq` / `sudo apt-get install -y python3-jsonschema python3-yaml`);
 > - `restore.sh` auto-installs both on a fresh system — including under `--dry-run`
->   (a preview still needs to read and validate the inventory; that's the only thing a
->   dry-run actually executes).
+>   (a preview still needs to read and validate the inventory and the backup source
+>   with read-only checks; nothing is installed or modified).
 
 ```bash
 # 1. Declare what you use (your manual responsibility — this file is the source of truth)
@@ -55,6 +55,10 @@ copying of the OS itself.
 ./restore.sh                        # prompts; --yes to skip, --dry-run to preview
 #   --configs-only = restore config only (skip all installs)
 #   --packages-only = install fresh only (skip config restore)
+#   --source <snapshot-dir> = restore config DIRECTLY from an external backup
+#     snapshot (e.g. a backup-* mirror snapshot on the Storage disk) — no manual
+#     copying into backups/ needed. Preflight verifies the source manifest and
+#     checks architecture / Ubuntu release / inventory compatibility.
 ```
 
 Then, optionally, as a separate exercise (only after the plain restore + verification):
@@ -82,7 +86,7 @@ Keep everything current day-to-day:
 | `./inventory.sh review` | Suggest undeclared apps found on the system | ✅ |
 | `./inventory.sh wizard` | Guided flow: scan the system, declare apps one by one | ✅ |
 | `./backup.sh` | Capture configs + service units + dotfiles + `user_dirs` → `backups/`, mirror to `BACKUP_DEST` (keep last `BACKUP_KEEP`); writes `status: ok` marker in `backup-info.txt` on success | ✅ |
-| `./restore.sh` | Fresh install + config restore (base OS upgrade is opt-in: `--upgrade-base`) | ⚠️ modifies system |
+| `./restore.sh` | Fresh install + config restore (config from `backups/` or `--source <snapshot>`; base OS upgrade is opt-in: `--upgrade-base`) | ⚠️ modifies system |
 | `./update_all_ubuntu.sh` | Update apt/snap/flatpak/npm + declared apps | ⚠️ modifies system |
 | `./schedule_cron.sh` | Install a @reboot scheduled backup | ⚠️ edits crontab |
 
@@ -116,10 +120,11 @@ items — you only think about the main apps you use.
 
 **Why is my backup so large?** Some apps keep caches, model stores, or bundled binaries
 inside their config folder (e.g. VS Code's `CachedExtensionVSIXs`/`CachedData`,
-Chrome's `optimization_guide_model_store`, Freebuff's bundled `freebuff/` binary). These
-are re-downloadable, so by default they are **excluded** from the backup via each app's
-`exclude:` list in the inventory — only real configuration is captured. Excluded items
-are not restored either; they regenerate on first launch.
+Chrome's `optimization_guide_model_store` and its runtime `Singleton*` files,
+Freebuff's bundled `freebuff/` binary). These are re-downloadable (or transient), so by
+default they are **excluded** from the backup via each app's `exclude:` list in the
+inventory — only real configuration is captured. Excluded items are not restored either;
+they regenerate on first launch.
 
 **Does backup keep old copies of removed/excluded config?** No. `backup.sh` wipes each
 app's captured folder before re-capturing, so `backups/` reflects the **current** state
@@ -132,6 +137,14 @@ file is written, but the manifest reports `status: degraded` instead of `status:
 (per-artifact lines show which were `missing`/`incomplete`). `restore.sh` refuses degraded
 snapshots unless you pass `--force-incomplete`. `degraded` is NOT the same as an
 interrupted run — interrupted runs never publish a live manifest at all.
+
+**Is the backup content verified?** Every `backup.sh` run writes a `SHA256SUMS` file
+alongside the captured config (covering every payload file except the manifest and
+mutable logs). `restore.sh` verifies it before restoring anything: all checksums must
+match, no device/FIFO/socket files, no symlinks escaping the snapshot, and files present
+but unlisted are reported as a warning. A snapshot created before integrity checking
+(no `SHA256SUMS`) is accepted with a warning; a **failed** verification refuses the
+restore unless you pass `--force-incomplete`.
 
 **How atomic is the `backups/` swap?** Publication is a two-step rename that is atomic
 only when `backups.staging/` and `backups/` share a filesystem — `backup.sh` verifies

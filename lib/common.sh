@@ -872,3 +872,82 @@ is_app_installed_by_source() {
 is_app_installed() {
   is_app_installed_by_source "$1"
 }
+
+# --- Backup content integrity (SHA256SUMS) --------------------------------
+# backup_generate_checksums DIR — write a deterministic SHA256SUMS over every
+# regular file under DIR except the checksum file itself, the manifest
+# (backup-info.txt) and mutable logs (*.log). Run from the staged tree so the
+# file ships in backups/ and every mirror snapshot. Deterministic: sorted
+# input -> stable sha256sum output.
+backup_generate_checksums() {
+  local dir="$1"
+  [ -d "$dir" ] || { err "backup_generate_checksums: not a directory: $dir"; return 1; }
+  require_cmd sha256sum
+  if ! ( cd "$dir" \
+        && find . -type f ! -name 'SHA256SUMS' ! -name 'backup-info.txt' ! -name '*.log' -print0 \
+           | sort -z \
+           | xargs -0 -r sha256sum > SHA256SUMS ); then
+    err "Failed to generate SHA256SUMS in $dir"
+    return 1
+  fi
+  [ -s "$dir/SHA256SUMS" ] || { rm -f "$dir/SHA256SUMS"; err "No regular files to checksum in $dir"; return 1; }
+  return 0
+}
+
+# backup_verify_integrity DIR — read-only verification of a backup tree before
+# restore. Returns 0 only when:
+#   * no hostile special files (block/char devices, FIFOs, sockets)
+#   * no symlinks escaping the snapshot root
+#   * every SHA256SUMS entry matches (missing/corrupt files fail)
+# Warns (does not fail) on files present but not listed in SHA256SUMS
+# (e.g. a mutable log appended by the scheduler after the backup ran).
+backup_verify_integrity() {
+  local dir="$1"
+  [ -d "$dir" ] || { err "backup_verify_integrity: not a directory: $dir"; return 1; }
+  [ -f "$dir/SHA256SUMS" ] || { err "backup_verify_integrity: no SHA256SUMS in $dir"; return 1; }
+  require_cmd sha256sum
+  local bad=0
+
+  # 1) Hostile special files (device nodes, FIFOs, sockets).
+  local special
+  special="$(find "$dir" \( -type b -o -type c -o -type p -o -type s \) -print 2>/dev/null | head -n20 || true)"
+  if [ -n "$special" ]; then
+    err "Backup contains special files (device/FIFO/socket) — refusing:"
+    printf '%s\n' "$special" | sed "s|^$dir/|  |" | head -n20 >&2
+    bad=1
+  fi
+
+  # 2) Symlinks escaping the snapshot root (realpath-aware, broken links safe).
+  local link realt
+  while IFS= read -r link; do
+    [ -n "$link" ] || continue
+    realt="$(realpath -m -- "$link" 2>/dev/null || printf '%s' "$link")"
+    case "$realt" in
+      "$dir"|"$dir"/*) : ;;
+      *) err "Backup symlink escapes the snapshot: $link -> $realt"; bad=1 ;;
+    esac
+  done < <(find "$dir" -type l -print 2>/dev/null)
+
+  # 3) Checksum verification — catches missing and corrupt files.
+  local out rc=0
+  out="$( cd "$dir" && sha256sum -c SHA256SUMS 2>&1 )" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf '%s\n' "$out" | grep -iE 'failed|no such file|warning' | head -n20 | sed 's/^/  /' >&2 || true
+    err "Backup content checksum verification FAILED ($dir/SHA256SUMS)"
+    bad=1
+  fi
+
+  # 4) Extra files: on disk but not listed in SHA256SUMS (warn only).
+  local tmpf tmps extra
+  tmpf="$(mktemp)"; tmps="$(mktemp)"
+  ( cd "$dir" && find . -type f ! -name 'SHA256SUMS' ! -name 'backup-info.txt' ! -name '*.log' -printf '%P\n' | sort ) > "$tmpf" 2>/dev/null || true
+  ( cd "$dir" && sed -n 's|^[0-9a-f]\{64\}  \./||p' SHA256SUMS | sort ) > "$tmps" 2>/dev/null || true
+  extra="$(comm -23 "$tmpf" "$tmps" | head -n20 || true)"
+  if [ -n "$extra" ]; then
+    warn "Files present in the backup but not in SHA256SUMS (post-backup additions?):"
+    printf '%s\n' "$extra" | sed 's/^/  /'
+  fi
+  rm -f "$tmpf" "$tmps"
+
+  return "$(( bad > 0 ? 1 : 0 ))"
+}

@@ -3,8 +3,9 @@
 # restore.sh — REBUILD the system from the inventory.
 #
 # Philosophy (see AGENTS.md): install everything FRESH from recommended sources
-# at the latest stable version; copy back ONLY configuration from backups/.
-# Never installs from backup files, never replays dpkg state, never pins versions.
+# at the latest stable version; copy back ONLY configuration from backups/
+# (or an external snapshot given with --source). Never installs from backup
+# files, never replays dpkg state, never pins versions.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -18,6 +19,8 @@ DO_UPGRADE=0
 CONFIGS_ONLY=0
 PACKAGES_ONLY=0
 FORCE_INCOMPLETE=0
+RESTORE_SOURCE=""
+BACKUP_LABEL="backups/"   # user-facing name of the config source (set to the snapshot under --source)
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -27,7 +30,8 @@ while [ $# -gt 0 ]; do
     --configs-only) CONFIGS_ONLY=1 ;;
     --packages-only) PACKAGES_ONLY=1 ;;
     --force-incomplete) FORCE_INCOMPLETE=1 ;;
-    *) die "Unknown option: $1 (usage: $0 [--dry-run] [--yes] [--upgrade-base] [--configs-only|--packages-only] [--force-incomplete])" ;;
+    --source)       shift; RESTORE_SOURCE="${1:-}"; [ -n "$RESTORE_SOURCE" ] || die "--source requires a snapshot directory argument." ;;
+    *) die "Unknown option: $1 (usage: $0 [--source <snapshot-dir>] [--dry-run] [--yes] [--upgrade-base] [--configs-only|--packages-only] [--force-incomplete])" ;;
   esac
   shift
 done
@@ -50,38 +54,119 @@ require_cmd sudo
 # Validate inventory before touching anything.
 validate_inventory || die "Inventory validation failed — fix inventory.yaml and re-run."
 
-# --- Determine backup status ---------------------------------------------
-BACKUPS_PRESENT=0
-BACKUPS_VERIFIED=0
-if [ -f "$BACKUP_MANIFEST" ]; then
+# --- Optional external backup source (--source) ---------------------------
+# With --source, restore reads configuration DIRECTLY from the given backup
+# snapshot (e.g. a backup-* mirror snapshot on an external drive) instead of
+# the repo-local backups/. The repo checkout is disposable and the backup
+# medium is authoritative — nothing is copied or mounted implicitly.
+if [ -n "$RESTORE_SOURCE" ]; then
+  RESTORE_SOURCE="$(realpath -m -- "$RESTORE_SOURCE" 2>/dev/null || printf '%s' "$RESTORE_SOURCE")"
+  if [ ! -d "$RESTORE_SOURCE" ]; then
+    die "Backup source not found: $RESTORE_SOURCE (--source expects a snapshot directory containing backup-info.txt, e.g. /media/$USER/Storage/backup-restore-ubuntu/backup-20260802-120000)"
+  fi
+  if [ ! -f "$RESTORE_SOURCE/backup-info.txt" ]; then
+    _newest_snap="$(ls -1dr "$RESTORE_SOURCE"/backup-* 2>/dev/null | head -n1 || true)"
+    if [ -n "$_newest_snap" ]; then
+      die "No backup-info.txt in $RESTORE_SOURCE — that looks like a mirror root holding snapshots. Pass a single snapshot, e.g.: $_newest_snap"
+    fi
+    die "No backup-info.txt in $RESTORE_SOURCE — not a backup snapshot (run ./backup.sh first, or point --source at a mirror snapshot)."
+  fi
+  BACKUPS_DIR="$RESTORE_SOURCE"
+  BACKUP_MANIFEST="$RESTORE_SOURCE/backup-info.txt"
+  BACKUP_LABEL="$RESTORE_SOURCE"
   BACKUPS_PRESENT=1
+  BACKUPS_VERIFIED=0
   if manifest_verify_restorable "$BACKUP_MANIFEST"; then
     BACKUPS_VERIFIED=1
   elif [ "$FORCE_INCOMPLETE" = "1" ]; then
     warn "Backup manifest is incomplete but --force-incomplete was specified — proceeding anyway."
     BACKUPS_VERIFIED=1
-  fi
-elif [ -d "$BACKUPS_DIR" ] && [ -n "$(find "$BACKUPS_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]; then
-  warn "backups/ contains data but no valid manifest (backup-info.txt with status: ok)."
-  if [ "$FORCE_INCOMPLETE" = "1" ]; then
-    BACKUPS_PRESENT=1
-    BACKUPS_VERIFIED=1
-  fi
-fi
-
-if [ "$BACKUPS_PRESENT" = "0" ]; then
-  if [ "$CONFIGS_ONLY" = "1" ]; then
-    warn "No backups/ found — --configs-only has nothing to restore."
   else
-    warn "No backups/ found — packages will still be installed, but configuration cannot be restored."
+    die "Cannot restore from $RESTORE_SOURCE: backup manifest is not verified (missing or no 'status: ok'). Use --force-incomplete to override."
+  fi
+
+  # Preflight compatibility checks (best-effort; older manifests may lack lines).
+  _src_arch="$(grep -m1 '^arch: ' "$BACKUP_MANIFEST" | cut -d' ' -f2- || true)"
+  if [ -n "$_src_arch" ] && [ "$_src_arch" != "$ARCH_NORM" ]; then
+    die "Backup was created on architecture '$_src_arch' but this machine is '$ARCH_NORM' — refusing to restore incompatible configuration."
+  fi
+  _src_os="$(grep -m1 '^ubuntu_version: ' "$BACKUP_MANIFEST" | cut -d' ' -f2- || true)"
+  if [ -n "$_src_os" ]; then
+    _cur_os=""
+    [ -r /etc/os-release ] && { . /etc/os-release; _cur_os="${VERSION_ID:-}"; }
+    if [ -n "$_cur_os" ] && [ "$_src_os" != "$_cur_os" ]; then
+      warn "Backup was created on Ubuntu $_src_os but this machine is $_cur_os — packages reinstall at latest versions, but some app configs may not match. Proceeding."
+    fi
+  fi
+  _src_sha="$(grep -m1 '^inventory_sha256: ' "$BACKUP_MANIFEST" | cut -d' ' -f2- || true)"
+  if [ -n "$_src_sha" ]; then
+    _cur_sha="$(sha256sum "$INVENTORY_FILE" | cut -d' ' -f1)"
+    if [ "$_src_sha" != "$_cur_sha" ]; then
+      warn "This repo's inventory.yaml differs from the one used to create this backup — items added since restore fresh, items removed are skipped."
+    fi
+  else
+    warn "Backup manifest has no inventory_sha256 — cannot verify inventory compatibility."
+  fi
+  if [ -w "$RESTORE_SOURCE" ]; then
+    warn "Backup source is writable. For safety, prefer restoring from a read-only medium (mounted drive, read-only snapshot)."
+  fi
+  info "Restoring from backup source: $RESTORE_SOURCE"
+fi
+
+# --- Determine backup status (repo-local backups/, unless --source) -------
+if [ -z "$RESTORE_SOURCE" ]; then
+  BACKUPS_PRESENT=0
+  BACKUPS_VERIFIED=0
+  if [ -f "$BACKUP_MANIFEST" ]; then
+    BACKUPS_PRESENT=1
+    if manifest_verify_restorable "$BACKUP_MANIFEST"; then
+      BACKUPS_VERIFIED=1
+    elif [ "$FORCE_INCOMPLETE" = "1" ]; then
+      warn "Backup manifest is incomplete but --force-incomplete was specified — proceeding anyway."
+      BACKUPS_VERIFIED=1
+    fi
+  elif [ -d "$BACKUPS_DIR" ] && [ -n "$(find "$BACKUPS_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+    warn "backups/ contains data but no valid manifest (backup-info.txt with status: ok)."
+    if [ "$FORCE_INCOMPLETE" = "1" ]; then
+      BACKUPS_PRESENT=1
+      BACKUPS_VERIFIED=1
+    fi
+  fi
+
+  if [ "$BACKUPS_PRESENT" = "0" ]; then
+    if [ "$CONFIGS_ONLY" = "1" ]; then
+      warn "No backups/ found — --configs-only has nothing to restore."
+    else
+      warn "No backups/ found — packages will still be installed, but configuration cannot be restored."
+    fi
+  fi
+
+  if [ "$BACKUPS_PRESENT" = "1" ] && [ "$BACKUPS_VERIFIED" = "0" ]; then
+    if [ "$CONFIGS_ONLY" = "1" ]; then
+      die "Cannot restore config: backup manifest is not valid (missing or no 'status: ok'). Use --force-incomplete to override."
+    elif [ "$PACKAGES_ONLY" != "1" ]; then
+      warn "Backup manifest is not valid — configuration will NOT be restored. Use --force-incomplete to override."
+    fi
   fi
 fi
 
-if [ "$BACKUPS_PRESENT" = "1" ] && [ "$BACKUPS_VERIFIED" = "0" ]; then
-  if [ "$CONFIGS_ONLY" = "1" ]; then
-    die "Cannot restore config: backup manifest is not valid (missing or no 'status: ok'). Use --force-incomplete to override."
-  elif [ "$PACKAGES_ONLY" != "1" ]; then
-    warn "Backup manifest is not valid — configuration will NOT be restored. Use --force-incomplete to override."
+# --- Content integrity (SHA256SUMS) --------------------------------------
+# Read-only verification of the restore source (repo backups/ or --source
+# snapshot): hostile special files, escaping symlinks, and checksum matches.
+# Skipped under --packages-only (no config is restored, so content is unused).
+# Legacy snapshots without SHA256SUMS are accepted with a warning. A failed
+# check means the payload is corrupt or tampered — refuse unless overridden.
+if [ "$BACKUPS_VERIFIED" = "1" ] && [ "$PACKAGES_ONLY" != "1" ]; then
+  if [ -f "$BACKUPS_DIR/SHA256SUMS" ]; then
+    if backup_verify_integrity "$BACKUPS_DIR"; then
+      ok "Backup content verified (SHA256SUMS)"
+    elif [ "$FORCE_INCOMPLETE" = "1" ]; then
+      warn "Backup content integrity check FAILED but --force-incomplete was specified — proceeding anyway."
+    else
+      die "Backup content integrity check FAILED (corrupt or tampered snapshot). Use --force-incomplete to override."
+    fi
+  else
+    warn "No SHA256SUMS in backup — skipping content integrity check (snapshot created before integrity checking)."
   fi
 fi
 
@@ -89,7 +174,7 @@ fi
 if [ "$DRY_RUN" = "0" ] && [ "$ASSUME_YES" = "0" ] && [ "$CONFIGS_ONLY" = "0" ] && [ "$PACKAGES_ONLY" = "0" ]; then
   confirm "This will install packages and modify the system. Continue?" "n" || die "Aborted."
 elif [ "$CONFIGS_ONLY" = "1" ] && [ "$DRY_RUN" = "0" ] && [ "$ASSUME_YES" = "0" ]; then
-  confirm "This will restore configuration from backups/ (no packages will be installed). Continue?" "n" || die "Aborted."
+  confirm "This will restore configuration from $BACKUP_LABEL (no packages will be installed). Continue?" "n" || die "Aborted."
 elif [ "$PACKAGES_ONLY" = "1" ] && [ "$DRY_RUN" = "0" ] && [ "$ASSUME_YES" = "0" ]; then
   confirm "This will install packages only (no configuration will be restored). Continue?" "n" || die "Aborted."
 fi
@@ -355,7 +440,7 @@ restore_services() {
       fi
       ok "  service: $unit ($target)"
     else
-      warn "  service '$unit': no unit file in backups/ — skipping."
+      warn "  service '$unit': no unit file in $BACKUP_LABEL — skipping."
       if [ "$BACKUPS_VERIFIED" = "1" ]; then
         mark_failure
       fi
@@ -412,7 +497,7 @@ restore_user_dirs() {
       run rsync -a "$BACKUPS_DIR/user-dirs/$rel/" "$HOME/$rel/"
       ok "  user dir: $d restored"
     else
-      warn "  user dir '$d': no backup in backups/user-dirs — skipping."
+      warn "  user dir '$d': no backup in $BACKUP_LABEL/user-dirs — skipping."
     fi
   done < <(yaml_list '.user_dirs[]')
 }
@@ -504,7 +589,7 @@ else
   ok "Restore complete."
 fi
 if [ "$DRY_RUN" = "1" ]; then
-  echo "(dry run — nothing was executed except yq install if needed to read the inventory)"
+  echo "(dry run — no system changes made; read-only checks (inventory, backup source) still ran)"
 fi
 if [ "$PACKAGES_ONLY" = "1" ] && [ "$BACKUPS_VERIFIED" = "1" ]; then
   echo

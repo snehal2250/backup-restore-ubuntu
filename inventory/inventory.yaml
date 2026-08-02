@@ -201,6 +201,7 @@ apps:
       - "GPUPersistentCache"
       - "Crashpad"
       - "GPUCache"
+      - "Singleton*"   # runtime singletons (SingletonSocket/Lock/Cookie) while Chrome runs
   - name: "fish"
     description: "Friendly interactive shell (official apt)"
     installer:

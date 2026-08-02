@@ -135,12 +135,12 @@ inventory.sh              <- MANUAL tool: list / add-* / remove-* / review / wiz
 backup.sh                 <- captures configs + service units + dotfiles -> backups/
                              (transactional: staging -> validate -> mirror -> atomic swap)
 restore.sh                <- fresh install + config overwrite (--dry-run/--yes/--upgrade-base/
-                             --configs-only/--packages-only/--force-incomplete)
+                             --configs-only/--packages-only/--force-incomplete/--source <snapshot>)
 update_all_ubuntu.sh      <- updates apt/snap/flatpak/npm + inventory apps
 schedule_cron.sh          <- installs a systemd user timer (daily + after boot)
-backups/                  <- output of backup.sh (GIT-IGNORED; contains personal config)
-                             (apps/<name>/, services/<unit>/, dotfiles/, user-dirs/<name>/)
-                           mirrored to BACKUP_DEST (default /media/vikram-athare/Storage/backup-restore-ubuntu)
+backups/                  <- output of backup.sh (GIT-IGNORED; contains personal config)                             (apps/<name>/, services/<unit>/, dotfiles/, user-dirs/<name>/,
+                              SHA256SUMS content checksums)
+                             mirrored to BACKUP_DEST (default /media/vikram-athare/Storage/backup-restore-ubuntu)
                            (the legacy single backup/ folder from the old script was
                            removed from git tracking; if its on-disk root-owned remnant
                            still exists, delete it with 'sudo rm -rf backup')
@@ -267,7 +267,9 @@ Rules for agents editing the inventory:
 ```
 Output goes to `backups/` (git-ignored) via transactional staging, then mirrored to
 `BACKUP_DEST`. The backup manifest (`backup-info.txt`) records per-artifact status and
-overall outcome. A `status: ok` line means ALL declared artifacts were captured. The
+overall outcome. A `status: ok` line means ALL declared artifacts were captured. Each
+run also writes `SHA256SUMS` (deterministic checksums over the payload, excluding the
+manifest and mutable logs); `restore.sh` verifies it before restoring config. The
 `in_progress` marker is written into the STAGING manifest (`backups.staging/backup-info.txt`)
 when a run starts — never into the live `backups/` manifest, which is only ever replaced
 atomically by a generation that passed final verification. A missing live manifest, or
@@ -276,6 +278,14 @@ one that does not report `status: ok`, means the last completed run did not succ
 **Restore** (on a fresh Ubuntu install):
 ```bash
 ./restore.sh                        # prompts; --yes to skip, --dry-run to preview
+./restore.sh --source /media/$USER/Storage/backup-restore-ubuntu/backup-20260802-120000
+#                                   # restore config DIRECTLY from an external backup
+#                                   # snapshot (no copying into backups/ needed).
+#                                   # Preflight: realpath resolve, require a verified
+#                                   # manifest (status: ok), verify arch / Ubuntu
+#                                   # release / inventory-SHA compatibility, warn on
+#                                   # writable sources, print the source before any
+#                                   # system change. Nothing is copied or mounted.
 ./restore.sh --upgrade-base         # OPT-IN: also apt full-upgrade of the base OS
 ./restore.sh --configs-only         # restore config only (skip all installs)
 ./restore.sh --packages-only        # install fresh only (skip config + services)
@@ -313,7 +323,11 @@ nonzero if any required item failed.
   `app_get`, `installer_get`/`installer_list`/`installer_has`, `expand_path`,
   `normalize_path`, `validate_path_contained`, `require_schema_validator`,
   `validate_schema_structure`, `validate_inventory`, `manifest_in_progress`,
-  `manifest_final`, `manifest_verify_restorable`, `publish_backup` (transactional swap:
+  `manifest_final`, `manifest_verify_restorable`,
+  `backup_generate_checksums`/`backup_verify_integrity` (SHA256SUMS content integrity:
+  generated over the staged payload by `backup.sh`, verified by `restore.sh` before any
+  config restore — hostile special files, escaping symlinks, missing/corrupt files,
+  extra-file warnings), `publish_backup` (transactional swap:
   same-filesystem check, fail-fast renames, rollback to the previous generation, cleanup
   trap), `run` (dry-run aware), status checkers (`is_apt_installed`, `is_snap_installed`,
   `is_flatpak_installed`, `is_app_installed_by_source`, `is_app_installed`),

@@ -213,6 +213,13 @@ if [ "$_missing_count" -gt 0 ] || [ "$_incomplete_count" -gt 0 ]; then
   warn "  $_missing_count declared path(s) missing, $_incomplete_count incomplete."
 fi
 
+# --- Content integrity: deterministic checksums over the staged payload ---
+# SHA256SUMS covers every staged regular file except the manifest, mutable
+# logs, and the checksum file itself. It ships in backups/ and every mirror
+# snapshot; restore.sh verifies it before touching the system.
+backup_generate_checksums "$STAGE"
+ok "SHA256SUMS generated for the staged payload"
+
 # --- Mirror to BACKUP_DEST ------------------------------------------------
 MIRROR_STATUS="disabled"
 

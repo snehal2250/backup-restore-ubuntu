@@ -32,6 +32,10 @@ Flags:
 ./restore.sh                 # prompts before touching the system
 ./restore.sh --yes           # skip all prompts
 ./restore.sh --dry-run       # preview everything; only yq auto-installs if missing
+./restore.sh --source <snapshot-dir>
+#                            # restore config DIRECTLY from an external backup
+#                            # snapshot (no copying into backups/ needed); the
+#                            # repo checkout is disposable, the snapshot is authoritative
 ./restore.sh --upgrade-base  # OPT-IN: also apt full-upgrade the base OS + autoremove
 ./restore.sh --configs-only  # restore config only (skip all installs)
 ./restore.sh --packages-only # install fresh only (skip config restore)
@@ -122,6 +126,27 @@ cp -a "$newest/." backups/
 > If you skip this step, restore still installs everything — but **no configuration can be
 > restored** (restore prints a warning and skips config copying).
 
+> **Easier alternative: `--source` (no copy needed).** Instead of copying a snapshot
+> into `backups/`, point restore directly at the snapshot on the external drive — the
+> repo checkout stays disposable and the backup medium is authoritative:
+>
+> ```bash
+> newest=$(ls -1dr /media/vikram-athare/Storage/backup-restore-ubuntu/backup-* | head -1)
+> ./restore.sh --source "$newest" --dry-run    # preview first
+> ./restore.sh --source "$newest" --yes        # then restore for real
+> ```
+>
+> `--source` resolves the path with `realpath`, requires a **verified** `backup-info.txt`
+> (`status: ok` + artifact list; `--force-incomplete` to override), and checks
+> architecture / Ubuntu release / inventory-SHA compatibility before any system change.
+> It warns if the source is writable (a read-only medium is safer), and prints the exact
+> source snapshot before touching anything. Nothing is copied or mounted implicitly.
+>
+> Because an explicit `--source` is authoritative, a bad source is **fatal** (restore
+> stops with an error) — unlike a bad local `backups/`, which warns and continues with
+> packages only. The same strict preflight applies even with `--packages-only`
+> (config restore is skipped, but the source must still be a valid, verified snapshot).
+
 ### 2.4 Check prerequisites
 - `sudo` — already required above.
 - `yq` — `restore.sh` **auto-installs it** on a fresh system (via `snap` or a download),
@@ -160,6 +185,11 @@ Read the output carefully. For every app you should see one of:
 Also verify `Phase 4/5: services` lists your custom services and that their unit files
 exist in `backups/services/<unit>/unit` (a missing unit file is warned as
 "no unit file in backups/ — skipping").
+
+Before anything else, expect a `Backup content verified (SHA256SUMS)` line: `restore.sh`
+checksum-verifies the payload and rejects hostile files (device/FIFO/socket, symlinks
+escaping the snapshot) before touching the system. A snapshot without `SHA256SUMS`
+(created before integrity checking) prints a warning and is accepted.
 
 ---
 
@@ -393,6 +423,14 @@ newest=$(ls -1dr /media/sf_snapshots/backup-* | head -1)
 cp -a "$newest/." backups/
 ```
 
+Or skip the copy entirely and point restore at the snapshot directly:
+
+```bash
+newest=$(ls -1dr /media/sf_snapshots/backup-* | head -1)
+./restore.sh --source "$newest" --dry-run     # preflight verifies the source manifest
+./restore.sh --source "$newest" --yes
+```
+
 ### 6.5 Preview
 
 ```bash
@@ -489,7 +527,10 @@ snapshot.
 | `Inventory schema validation needs python3 with the 'jsonschema' and 'yaml' modules` | restore could not auto-install the schema validator. Install it manually: `sudo apt-get install -y python3-jsonschema python3-yaml`, then re-run. |
 | `Inventory failed schema validation` / `schema check FAILED` | `inventory.yaml` violates `inventory/schema.yaml` (wrong `schema_version`/`profile`, invalid package/unit/group/path, disallowed key for the install type...). Run `./inventory.sh validate` on your working machine, fix, re-run `backup.sh`, and bring a fresh snapshot. |
 | `unsupported architecture` / `unsupported Ubuntu release` | This repo hard-blocks platforms outside `SUPPORTED_ARCHS`/`SUPPORTED_UBUNTU_RELEASES` (amd64/arm64, Ubuntu 22.04/24.04). Use a supported machine or extend the constants in `lib/common.sh`. |
-| `No backups/ found — configuration cannot be restored` | You skipped step 2.3. Copy the newest snapshot into `backups/` and re-run. |
+| `No backups/ found — configuration cannot be restored` | You skipped step 2.3. Copy the newest snapshot into `backups/`, or just pass `--source "$newest"` (§ 2.3 alternative) and re-run. |
+| `Backup content integrity check FAILED` | The snapshot's `SHA256SUMS` doesn't match its files — corruption, a partial copy, or tampering. Re-run `./backup.sh` and bring a fresh snapshot; use `--force-incomplete` only if you accept the risk. |
+| `Backup source not found: ...` | `--source` pointed at a nonexistent path, or at a mirror *root* (a folder of `backup-*` snapshots) instead of a single snapshot. Pass a snapshot directory that contains `backup-info.txt` (the error prints the newest snapshot to use). |
+| `Backup was created on architecture '...' but this machine is '...'` | The `--source` snapshot was made on a different CPU architecture — restore refuses incompatible config by design. Make a backup on this machine's architecture and re-run. |
 | `no unit file in backups/ — skipping` | The service's unit file wasn't captured. Run `./backup.sh` on your working machine, re-copy `backups/`, re-run. |
 | `install script for '<app>' failed` / installer step errored | The typed installer failed (network, missing dep, checksum mismatch, key-fingerprint mismatch). Fix the cause, re-run; restore continues with other items. |
 | `Temporary failure resolving ...` / DNS errors mid-restore | Network/DNS dropped. Make the DNS fix **persistent** — a transient `nameserver` gets overwritten on reconnect/reboot and the restore fails again mid-run: set `nameserver 8.8.8.8` in a static `/etc/resolv.conf` (or via the connection: `nmcli connection modify ... ipv4.dns "8.8.8.8 1.1.1.1" ipv4.ignore-auto-dns yes`); if `systemd-resolved` itself crashes, disable it and use the static file. Then re-run restore (idempotent). Don't power-cycle while apt is mid-transaction. |

@@ -186,6 +186,11 @@ cp -a "$newest/." backups/
 tail -5 backups/backup-info.txt     # must show a 'status: ok' line
 ```
 
+> Or skip the copy entirely and point restore straight at the snapshot:
+> `./restore.sh --source "$newest" --dry-run` (§ 6) — `--source` verifies the snapshot's
+> `backup-info.txt` (`status: ok`), checks architecture / Ubuntu release / inventory
+> compatibility, and reads config directly from the live share (no copying).
+>
 > `backups/` is git-ignored, so a fresh clone won't have it — copying the newest snapshot
 > in is required or restore installs everything but skips config restoration.
 >
@@ -201,6 +206,8 @@ tail -5 backups/backup-info.txt     # must show a 'status: ok' line
 ```bash
 cd ~/backup-restore-ubuntu
 ./restore.sh --dry-run       # preview — only yq auto-installs if missing
+# with the snapshot on the share instead of backups/:
+# ./restore.sh --source "$(ls -1dr /media/sf_snapshots/backup-* | head -1)" --dry-run
 ```
 
 Read every app: expect `already installed (found '...')` only for stock-Ubuntu items;
