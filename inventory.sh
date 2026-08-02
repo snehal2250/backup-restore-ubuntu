@@ -98,7 +98,9 @@ cmd_list() {
     [ -n "$pkg" ] && tags="$tags  pkg=$pkg"
     [ "${cfg_cnt:-0}" -gt 0 ] && tags="$tags  configs=$cfg_cnt"
     [ "${dep_cnt:-0}" -gt 0 ] && tags="$tags  deps=$dep_cnt"
-    [ "${cfg_cnt:-0}" -eq 0 ] && [ "$itype" != "snap" ] && tags="$tags  (no config)"
+    if [ "${cfg_cnt:-0}" -eq 0 ] && [ "$itype" != "snap" ] && [ "$itype" != "snap_classic" ]; then
+      tags="$tags  (no config)"
+    fi
     if is_app_installed "$name"; then
       printf '    [x] %-20s %s\n' "$name" "$tags"
     else
@@ -107,9 +109,9 @@ cmd_list() {
   done < <(yq -r '
     .apps[] | [
       .name,
-      (.install_type // "___EMPTY___"),
+      (.installer.type // "___EMPTY___"),
       (.check_cmd // "___EMPTY___"),
-      (.package // "___EMPTY___"),
+      (.installer.package // "___EMPTY___"),
       ((.config_paths // []) | length),
       ((.depends_apt   // []) | length)
     ] | @tsv
@@ -198,17 +200,48 @@ cmd_remove_package() {
 }
 
 # --- add-app (wizard) / remove-app ----------------------------------------
+# write_app NAME DESC CHECK DEPS PATHS EXCL [EXTENSIONS]
+# Emits an app entry with the structured `installer:` block. The installer
+# fields are read from the installer_* variables set by the catalog parse or
+# the wizard prompts (installer_type + installer_url/suite/packages/...).
 write_app() {
-  local name="$1" desc="$2" itype="$3" icmd="$4" check="$5" deps="$6" paths="$7" pkg="${8:-}" excl="${9:-}"
+  local name="$1" desc="$2" check="$3" deps="$4" paths="$5" excl="$6" exts="${7:-}"
+  # Temp file must live next to the repo (NOT /tmp): the snap-packaged yq
+  # cannot read /tmp, and load() would fail with 'no such file or directory'.
   local tmp
-  tmp="$(mktemp)"
+  tmp="$(mktemp "$REPO_ROOT/.app-entry.XXXXXX")"
   {
     printf -- '- name: "%s"\n' "$(esc "$name")"
     [ -n "$desc" ] && printf '  description: "%s"\n' "$(esc "$desc")"
-    printf '  install_type: "%s"\n' "$(esc "$itype")"
-    [ -n "$icmd" ] && printf '  install_command: "%s"\n' "$(esc "$icmd")"
+    if [ -n "${installer_type:-}" ]; then
+      echo "  installer:"
+      printf '    type: "%s"\n' "$(esc "$installer_type")"
+      local k v varname l
+      for k in package url suite key_url key_fingerprint arch checksum checksum_url binary dest version version_url version_query; do
+        varname="installer_$k"
+        v="${!varname:-}"
+        [ -n "$v" ] && printf '    %s: "%s"\n' "$k" "$(esc "$v")"
+      done
+      varname="installer_unverified"
+      v="${!varname:-}"
+      [ -n "$v" ] && printf '    unverified: %s\n' "$v"
+      for k in components packages; do
+        varname="installer_$k"
+        v="${!varname:-}"
+        if [ "$v" = "_none_" ]; then
+          echo "    $k: []"
+        elif [ -n "$v" ]; then
+          echo "    $k:"
+          local -a arr=()
+          read -ra arr <<< "$v"
+          for l in "${arr[@]}"; do printf '      - "%s"\n' "$(esc "$l")"; done
+        fi
+      done
+    else
+      rm -f "$tmp"
+      die "write_app: no installer_type set — cannot write a valid app entry"
+    fi
     [ -n "$check" ] && printf '  check_cmd: "%s"\n' "$(esc "$check")"
-    [ -n "$pkg" ] && printf '  package: "%s"\n' "$(esc "$pkg")"
     if [ -n "$deps" ]; then
       echo "  depends_apt:"
       for d in $deps; do printf '    - "%s"\n' "$(esc "$d")"; done
@@ -228,6 +261,14 @@ write_app() {
         printf '    - "%s"\n' "$(esc "$e")"
       done
     fi
+    if [ -n "$exts" ]; then
+      echo "  extensions:"
+      local -a x_arr=()
+      read -ra x_arr <<< "$exts"
+      for x in "${x_arr[@]}"; do
+        printf '    - "%s"\n' "$(esc "$x")"
+      done
+    fi
   } > "$tmp"
   yq -i '.apps += load("'"$tmp"'")' "$INVENTORY_FILE"
   rm -f "$tmp"
@@ -235,8 +276,10 @@ write_app() {
 
 write_service() {
   local unit="$1" target="$2" enable="$3" start="$4" paths="$5"
+  # Temp file must live next to the repo (NOT /tmp): the snap-packaged yq
+  # cannot read /tmp, and load() would fail with 'no such file or directory'.
   local tmp
-  tmp="$(mktemp)"
+  tmp="$(mktemp "$REPO_ROOT/.service-entry.XXXXXX")"
   {
     printf -- '- unit: "%s"\n' "$(esc "$unit")"
     printf '  target: %s\n' "$target"
@@ -255,7 +298,7 @@ write_service() {
 }
 
 cmd_add_app() {
-  local name="${1:-}" desc="" itype="" icmd="" check="" deps="" paths="" pkg="" excl=""
+  local name="${1:-}" desc="" itype="" check="" deps="" paths="" excl=""
   if [ -z "$name" ]; then
     printf 'App name (e.g. opencode): '
     read -r name
@@ -265,6 +308,9 @@ cmd_add_app() {
   if yaml_list '.apps[] | .name' | grep -Fqx "$name"; then
     die "App '$name' is already in the inventory."
   fi
+
+  # Clear any installer_* state from a previous catalog lookup.
+  unset installer_type installer_package installer_url installer_suite installer_components installer_key_url installer_key_fingerprint installer_packages installer_arch installer_checksum installer_checksum_url installer_unverified installer_binary installer_dest installer_version installer_version_url installer_version_query 2>/dev/null || true
 
   local template
   template="$(catalog_lookup "$name")"
@@ -279,48 +325,84 @@ cmd_add_app() {
     done <<<"$template"
     echo "Found '$name' in the built-in catalog:"
     [ -n "${description:-}" ] && echo "  ${description}"
-    echo "  install_type:   ${install_type:-?}"
-    [ -n "${install_command:-}" ] && echo "  install_command: ${install_command}"
+    echo "  installer:      type=${installer_type:-?}"
+    [ -n "${installer_url:-}" ] && echo "  installer url:   ${installer_url}"
+    [ -n "${installer_package:-}" ] && echo "  installer pkg:   ${installer_package}"
     [ -n "${config_paths:-}" ] && echo "  config_paths:    ${config_paths//$'\n'/ }"
     if confirm "Use these defaults?" "y"; then
-      write_app "$name" "${description:-}" "$install_type" "${install_command:-}" \
-        "${check_cmd:-}" "${depends_apt:-}" "${config_paths:-}" "${package:-}" "${exclude:-}"
+      write_app "$name" "${description:-}" "${check_cmd:-}" "${depends_apt:-}" \
+        "${config_paths:-}" "${exclude:-}" "${extensions:-}"
       ok "Added app '$name'."
       return 0
     fi
-    desc=""; itype=""; icmd=""; check=""; deps=""; paths=""; pkg=""; excl=""
-    unset description install_type install_command check_cmd depends_apt config_paths package exclude
+    desc=""; check=""; deps=""; paths=""; excl=""
+    unset description check_cmd depends_apt config_paths exclude extensions
+    unset installer_type installer_package installer_url installer_suite installer_components installer_key_url installer_key_fingerprint installer_packages installer_arch installer_checksum installer_checksum_url installer_unverified installer_binary installer_dest installer_version installer_version_url installer_version_query 2>/dev/null || true
     echo
     echo "Running the manual wizard instead."
   fi
 
-  # Install method.
+  # Install method (typed installer record).
   if [ -z "$itype" ]; then
-    echo "Install method for '$name':"
+    echo "Install method for '$name' (the structured installer record):"
+    echo "  package-based: apt | snap | snap_classic | flatpak | npm_global | pipx | cargo"
+    echo "  download:      apt_repository | deb | tarball | script (explicit last resort)"
     local i=1 t
-    for t in apt snap snap-classic flatpak npm-global pipx cargo script custom; do
+    for t in apt snap snap_classic flatpak npm_global pipx cargo apt_repository deb tarball script; do
       echo "  $i) $t"
       i=$((i + 1))
     done
-    printf 'Select [1-9]: '
+    printf 'Select [1-11]: '
     read -r sel
-    itype="$(printf '%s\n' 'apt snap snap-classic flatpak npm-global pipx cargo script custom' | awk -v n="$sel" '{print $n}')"
+    itype="$(printf '%s\n' 'apt snap snap_classic flatpak npm_global pipx cargo apt_repository deb tarball script' | awk -v n="$sel" '{print $n}')"
     [ -n "$itype" ] || die "Invalid selection."
   fi
+  installer_type="$itype"
 
-  if [ "$itype" = "script" ] || [ "$itype" = "custom" ]; then
-    if [ -z "$icmd" ]; then
-      printf 'Install command: '
-      read -r icmd
-      [ -n "$icmd" ] || die "An install command is required for $itype."
-    fi
-  fi
+  # Type-specific installer fields.
   case "$itype" in
-    apt|snap|snap-classic|flatpak)
-      if [ -z "$pkg" ]; then
+    apt|snap|snap_classic|flatpak|npm_global|pipx|cargo)
+      if [ -z "${installer_package:-}" ]; then
         printf 'Package name if it differs from the app name (blank = "%s"): ' "$name"
-        read -r pkg
+        read -r installer_package
       fi
+      ;;
+    apt_repository)
+      [ -n "${installer_url:-}" ] || { printf 'Repository base URL (https://...): '; read -r installer_url; }
+      [ -n "${installer_suite:-}" ] || { printf 'Suite (literal, or "codename" for the running Ubuntu): '; read -r installer_suite; }
+      [ -n "${installer_components:-}" ] || { printf 'Components (space-separated; blank = main, "none" = none): '; read -r installer_components; }
+      [ -n "${installer_key_url:-}" ] || { printf 'Signing key URL (https://...): '; read -r installer_key_url; }
+      [ -n "${installer_packages:-}" ] || { printf 'Packages to install from the repo (space-separated): '; read -r installer_packages; }
+      [ "${installer_components:-}" = "none" ] && installer_components="_none_"
+      [ -n "${installer_components:-}" ] || installer_components="main"
+      ;;
+    deb)
+      [ -n "${installer_url:-}" ] || { printf '.deb URL (https://..., {arch} allowed): '; read -r installer_url; }
+      if [[ "${installer_url:-}" == *"{version}"* ]] && [ -z "${installer_version_url:-}" ]; then
+        printf 'Version URL to resolve {version} (https://...): '; read -r installer_version_url
+      fi
+      [ -n "${installer_arch:-}" ] || { printf 'Architecture gate (blank = any, or amd64/arm64): '; read -r installer_arch; }
+      printf 'sha256 checksum (blank = unverified): '; read -r installer_checksum
+      [ -n "$installer_checksum" ] || installer_unverified="true"
+      ;;
+    tarball)
+      [ -n "${installer_url:-}" ] || { printf 'Tarball URL (https://..., {arch}/{version} allowed): '; read -r installer_url; }
+      if [[ "${installer_url:-}" == *"{version}"* ]] && [ -z "${installer_version_url:-}" ]; then
+        printf 'Version URL to resolve {version} (https://...): '; read -r installer_version_url
+      fi
+      [ -n "${installer_arch:-}" ] || { printf 'Architecture gate (blank = any, or amd64/arm64): '; read -r installer_arch; }
+      [ -n "${installer_binary:-}" ] || { printf 'Binary path inside the tarball to symlink into /usr/local/bin (optional): '; read -r installer_binary; }
+      [ -n "${installer_dest:-}" ] || { printf 'Extract destination (blank = /usr/local): '; read -r installer_dest; }
+      printf 'sha256 checksum (blank = unverified): '; read -r installer_checksum
+      if [ -z "$installer_checksum" ]; then
+        printf 'sha256 checksum URL/sidecar (https://..., optional): '; read -r installer_checksum_url
+        [ -n "$installer_checksum_url" ] || installer_unverified="true"
+      fi
+      ;;
+    script)
+      [ -n "${installer_url:-}" ] || { printf 'Install script URL (https://...): '; read -r installer_url; }
+      printf 'sha256 checksum of the script (blank = unverified): '; read -r installer_checksum
+      [ -n "$installer_checksum" ] || installer_unverified="true"
       ;;
   esac
   if [ -z "$check" ]; then
@@ -381,7 +463,7 @@ cmd_add_app() {
     warn "  No config paths declared — this app's settings will NOT be backed up or restored."
   fi
 
-  write_app "$name" "$desc" "$itype" "$icmd" "$check" "$deps" "$paths" "$pkg" "$excl"
+  write_app "$name" "$desc" "$check" "$deps" "$paths" "$excl"
   ok "Added app '$name'."
 }
 

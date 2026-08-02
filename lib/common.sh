@@ -135,6 +135,29 @@ app_get() {
   N="$1" yq -r ".apps[] | select(.name == strenv(N)) | $2 // \"\"" "$INVENTORY_FILE"
 }
 
+# installer_get NAME QUERY -> scalar attribute under .installer (empty if absent)
+# QUERY is always a fixed expression like '.type' or '.package'.
+installer_get() {
+  require_yq "$YQ_AUTO"
+  N="$1" yq -r ".apps[] | select(.name == strenv(N)) | .installer$2 // \"\"" "$INVENTORY_FILE"
+}
+
+# installer_list NAME QUERY -> lines under .installer (callers pass '.packages[]?'
+# or '.components[]?' — the '?' suppresses the iterate-over-null error).
+installer_list() {
+  require_yq "$YQ_AUTO"
+  N="$1" yq -r ".apps[] | select(.name == strenv(N)) | .installer$2" "$INVENTORY_FILE"
+}
+
+# installer_has NAME QUERY -> 0 if the .installer field is present (even if
+# null/empty list), 1 if absent. Used to distinguish 'components absent'
+# (defaults to main) from 'components: []' (no components).
+installer_has() {
+  require_yq "$YQ_AUTO"
+  local name="$1" q="$2"
+  N="$name" yq -e ".apps[] | select(.name == strenv(N)) | .installer$q != null" "$INVENTORY_FILE" >/dev/null 2>&1
+}
+
 # --- Safe path helpers ---------------------------------------------------
 # normalize_path: resolve '~' and '..' then canonicalise.
 # Returns the canonical path; exits non-zero if it escapes $HOME or /.
@@ -274,40 +297,39 @@ check_system_support() {
   return "$(( errs > 0 ? 1 : 0 ))"
 }
 
-# check_interactive_commands: restore runs unattended, so script/custom
-# installers must not need a human at a prompt. Catches known interactive TUI
-# binaries and package-manager invocations without their -y/--yes flag.
-# HEURISTIC, NOT EXHAUSTIVE: it cannot know about every prompt (e.g. 'npm
-# login', 'az login' or a custom installer's own prompts), so a clean pass does
-# not prove a command is non-interactive.
-# Note: install_command is free text (may contain quotes) — never send it
-# through yq @tsv (it quotes double-quote fields); join columns with paste.
-check_interactive_commands() {
-  local errs=0 name icmd tok
-  local interactive_tokens="read select zenity whiptail dialog kdialog yad gum fzf ssh scp sftp"
-  local rs=$'\x1f'
-  while IFS="$rs" read -r name icmd; do
+# check_installer_templates: deb/tarball URLs (and checksum_url sidecars) may
+# contain {version}, which must be resolvable from 'version' or 'version_url'.
+# The old opaque install_command is gone (schema v2) — the structured
+# installer types no longer carry free-form shell, so there is nothing left to
+# heuristically scan for interactivity: remote scripts are an explicit
+# last-resort type ('script') and their content is downloaded and executed as
+# a file, never piped inline.
+check_installer_templates() {
+  local errs=0 name itype url csurl
+  while IFS= read -r name; do
     [ -n "$name" ] || continue
-    [ -n "$icmd" ] || continue
-    for tok in $interactive_tokens; do
-      if grep -Eq "(^|[;&|[:space:]])${tok}([[:space:]]|$)" <<< "$icmd"; then
-        warn "  app '$name': install_command invokes interactive tool '$tok' — restore runs unattended and cannot answer prompts"
-        errs=$((errs + 1))
-      fi
-    done
-    if grep -Eq "(^|[;&|[:space:]])apt(-get)? (install|remove|purge|autoremove)([[:space:]]|$)" <<< "$icmd" \
-       && ! grep -Eq -- '-y|--yes|--assume-yes|-qq' <<< "$icmd"; then
-      warn "  app '$name': apt install without -y/--yes — restore runs unattended and cannot confirm the prompt"
+    itype="$(installer_get "$name" '.type')"
+    url="$(installer_get "$name" '.url')"
+    case "$itype" in
+      deb|tarball)
+        if [[ "$url" == *"{version}"* ]] && [ -z "$(installer_get "$name" '.version')" ] && [ -z "$(installer_get "$name" '.version_url')" ]; then
+          warn "  app '$name': installer url uses {version} but neither 'version' nor 'version_url' is declared"
+          errs=$((errs + 1))
+        fi
+        ;;
+      script)
+        if [[ "$url" == *"{version}"* ]]; then
+          warn "  app '$name': script installer urls cannot use {version}"
+          errs=$((errs + 1))
+        fi
+        ;;
+    esac
+    csurl="$(installer_get "$name" '.checksum_url')"
+    if [ -n "$csurl" ] && [[ "$csurl" == *"{version}"* ]] && [ -z "$(installer_get "$name" '.version')" ] && [ -z "$(installer_get "$name" '.version_url')" ]; then
+      warn "  app '$name': checksum_url uses {version} but neither 'version' nor 'version_url' is declared"
       errs=$((errs + 1))
     fi
-    if grep -Eq "(^|[;&|[:space:]])flatpak (install|uninstall|update)([[:space:]]|$)" <<< "$icmd" \
-       && ! grep -Eq -- '-y|--assumeyes|--noninteractive' <<< "$icmd"; then
-      warn "  app '$name': flatpak install without -y — restore runs unattended and cannot confirm the prompt"
-      errs=$((errs + 1))
-    fi
-  done < <(paste -d "$rs" \
-    <(yq -r '.apps[] | .name' "$INVENTORY_FILE") \
-    <(yq -r '.apps[] | (.install_command // "")' "$INVENTORY_FILE"))
+  done < <(yaml_list '.apps[] | .name')
   return "$(( errs > 0 ? 1 : 0 ))"
 }
 
@@ -465,8 +487,9 @@ validate_inventory() {
   fi
 
   # 5) default_shell must be provided by a declared package — either a declared
-  #    app name, a declared apt package, or the package name an apt-declared app
-  #    overrides with (e.g. app 'myfish' install_type apt package 'fish').
+  #    app name, a declared apt package, the package name an apt-installed app
+  #    overrides with (e.g. app 'myfish' installer type apt package 'fish'), or a
+  #    package from an apt_repository app's installer.packages.
   #    (here-strings, not pipes: pipefail + early-exit grep SIGPIPEs slow yq)
   local shell_path shell_bin app_names pkg_names apt_pkgs
   shell_path="$(yaml_get '.default_shell')"
@@ -474,11 +497,11 @@ validate_inventory() {
     shell_bin="$(basename "$shell_path")"
     app_names="$(yaml_list '.apps[] | .name')"
     pkg_names="$(yaml_list '.apt_packages[]')"
-    apt_pkgs="$(yq -r '.apps[] | select(.install_type == "apt") | .package // ""' "$INVENTORY_FILE")"
+    apt_pkgs="$(yq -r '[.apps[] | select(.installer.type == "apt") | .installer.package // ""] + [.apps[] | select(.installer.type == "apt_repository") | .installer.packages[]?] | .[] | select(. != "")' "$INVENTORY_FILE")"
     if ! grep -Fqx "$shell_bin" <<< "$app_names" \
        && ! grep -Fqx "$shell_bin" <<< "$pkg_names" \
        && ! grep -Fqx "$shell_bin" <<< "$apt_pkgs"; then
-      warn "  default_shell '$shell_path': no declared app, apt package, or apt app package override provides '$shell_bin'"
+      warn "  default_shell '$shell_path': no declared app, apt package, apt app package override, or apt_repository package provides '$shell_bin'"
       errors=$((errors + 1))
     fi
   fi
@@ -499,8 +522,8 @@ validate_inventory() {
     fi
   done < <(yaml_list '.user_dirs[]')
 
-  # 7) script/custom installers must not require interactive input.
-  if ! check_interactive_commands; then
+  # 7) deb/tarball URLs must resolve their {version} placeholders.
+  if ! check_installer_templates; then
     errors=$((errors + 1))
   fi
 
@@ -807,42 +830,45 @@ is_flatpak_installed() {
 # This is stricter than mere 'command -v' — it verifies the expected package manager.
 is_app_installed_by_source() {
   local name="$1" itype check pkg
-  itype="$(app_get "$name" '.install_type')"
+  itype="$(installer_get "$name" '.type')"
   check="$(app_get "$name" '.check_cmd')"
-  pkg="$(app_get "$name" '.package')"
+  pkg="$(installer_get "$name" '.package')"
   [ -n "$pkg" ] || pkg="$name"
 
   case "$itype" in
     apt)           is_apt_installed "$pkg" && return 0 || return 1 ;;
-    snap|snap-classic) is_snap_installed "$pkg" && return 0 || return 1 ;;
+    snap|snap_classic) is_snap_installed "$pkg" && return 0 || return 1 ;;
     flatpak)       is_flatpak_installed "$pkg" && return 0 || return 1 ;;
-    npm-global)
+    npm_global)
       command -v npm >/dev/null 2>&1 && npm list -g --depth=0 "$pkg" >/dev/null 2>&1 && return 0 || return 1 ;;
     pipx)
       command -v pipx >/dev/null 2>&1 && pipx list --short 2>/dev/null | grep -q "^$pkg " && return 0 || return 1 ;;
     cargo)
       command -v "$check" >/dev/null 2>&1 && return 0 || return 1 ;;
-    script|custom)
+    apt_repository)
+      # Source-specific: every declared repo package must be installed via dpkg
+      # (not just the check binary present — it could come from another source).
+      local -a rpkgs=()
+      local rp rp_all=1
+      while IFS= read -r rp; do [ -n "$rp" ] && rpkgs+=("$rp"); done < <(installer_list "$name" '.packages[]?')
+      if [ "${#rpkgs[@]}" -gt 0 ]; then
+        for rp in "${rpkgs[@]}"; do
+          is_apt_installed "$rp" || { rp_all=0; break; }
+        done
+        [ "$rp_all" = "1" ] && return 0
+        return 1
+      fi
+      [ -n "$check" ] && command -v "$check" >/dev/null 2>&1 && return 0 || return 1 ;;
+    deb|tarball|script)
       [ -n "$check" ] && command -v "$check" >/dev/null 2>&1 && return 0 || return 1 ;;
     *) return 1 ;;
   esac
 }
 
-# is_app_installed NAME -> true if the app appears to be installed (legacy fallback).
+# is_app_installed NAME -> true if the app appears installed via its declared
+# source (used by ./inventory.sh list). Delegates to the source-specific
+# checker so the list agrees with what restore would do for every installer
+# type (apt_repository apps are only "installed" when their repo packages are).
 is_app_installed() {
-  local name="$1" itype check pkg
-  itype="$(app_get "$name" '.install_type')"
-  check="$(app_get "$name" '.check_cmd')"
-  pkg="$(app_get "$name" '.package')"
-  [ -n "$pkg" ] || pkg="$name"
-  if [ -n "$check" ]; then
-    command -v "$check" >/dev/null 2>&1 && return 0 || return 1
-  fi
-  case "$itype" in
-    apt)          is_apt_installed "$pkg" ;;
-    snap|snap-classic) is_snap_installed "$pkg" ;;
-    flatpak)      is_flatpak_installed "$pkg" ;;
-    npm-global)   command -v "$name" >/dev/null 2>&1 ;;
-    *)            return 1 ;;
-  esac
+  is_app_installed_by_source "$1"
 }

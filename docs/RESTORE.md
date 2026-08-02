@@ -151,8 +151,11 @@ cd ~/backup-restore-ubuntu
 Read the output carefully. For every app you should see one of:
 - `already installed (found '...')` — the check binary exists; no install will happen;
 - `[dry-run] sudo apt-get install -y ...` / `[dry-run] sudo snap install ...` / etc. — the
-  exact install command that will run;
-- `[dry-run] install <app>: <install_command>` — the official installer that will run.
+  exact install step that will run;
+- typed-installer dry-run steps — e.g. `[dry-run] curl -fsSL -o /etc/apt/keyrings/...`
+  (repo key), `[dry-run] sudo apt-get install -y <pkg>` (from an `apt_repository`),
+  `[dry-run] curl -fsSL -o /tmp/... .deb` + `[dry-run] sudo apt-get install -y /tmp/...deb`
+  (a `deb`), or `[dry-run] bash /tmp/<app>.install.sh` (a `script`).
 
 Also verify `Phase 4/5: services` lists your custom services and that their unit files
 exist in `backups/services/<unit>/unit` (a missing unit file is warned as
@@ -200,8 +203,9 @@ one (classic entries get `--classic`). If `flatpak_apps` is non-empty and flatpa
 missing, it is installed and Flathub is added automatically.
 
 **Phase 3/5 — apps.** For each app: dependencies (`depends_apt`) install first, then the
-app via its method (`apt`/`snap`/`snap-classic`/`flatpak`/`npm-global`/`pipx`/`cargo`/
-`script`/`custom`). After install, the app's `config_paths` are rsynced back from
+app via its typed `installer:` record (`apt`/`snap`/`snap_classic`/`flatpak`/
+`npm_global`/`pipx`/`cargo`/`apt_repository`/`deb`/`tarball`/`script` — implemented in
+`lib/installers.sh`). After install, the app's `config_paths` are rsynced back from
 `backups/apps/<name>/` — both `$HOME` parts and `/` (root) parts if present.
 
 **Phase 4/5 — services.** Each declared service's unit file is copied to
@@ -224,16 +228,17 @@ a pristine config, delete the app's config dir before re-running restore.
 
 Two failure behaviors, by design:
 
-- A **custom/script installer** that errors (`bash -c "$install_command"`) prints a warning
-  and restore **continues** with the remaining apps.
+- A **`script`/`deb`/`tarball` installer** that errors (download failure, checksum
+  mismatch, the remote script exits nonzero) prints a warning and restore **continues**
+  with the remaining apps.
 - Any other failure (e.g. an `apt`/`snap` install error) **aborts the run** (`set -e`).
   Fix the cause, then re-run `./restore.sh --yes` — restore is idempotent and picks up
   where it left off.
 
 > ⚠️ A green `[ OK ] <app>: config restored` line means the *captured config* was copied
-> back — it does **not** mean the app's install step succeeded (a failed `script`/`custom`
-> installer still restores config before restore continues). Watch the warning lines above
-> each app, not just the green ones.
+> back — it does **not** mean the app's install step succeeded (a failed installer still
+> restores config before restore continues). Watch the warning lines above each app, not
+> just the green ones.
 
 ---
 
@@ -241,7 +246,7 @@ Two failure behaviors, by design:
 
 ```bash
 # 1. Review the output for warnings you should act on
-#    (failed custom installers, missing unit files, skipped configs...)
+#    (failed script installers, missing unit files, skipped configs...)
 
 # 2. Verify a few apps launched/CLI commands work:
 code --version          # vs code
@@ -395,9 +400,10 @@ cp -a "$newest/." backups/
 ```
 
 Read every app: expect `already installed (found '...')` only for things a stock Ubuntu
-ships; everything else should print the exact `apt`/`snap`/`npm`/installer command that
-will run. Also confirm Phase 4 lists your custom services and their unit files exist in
-`backups/services/<unit>/unit`.
+ships; everything else should print the exact typed-installer steps that will run
+(`apt`/`snap`/`npm` installs, repo-key downloads + `apt_repository` setup, `.deb`/
+tarball/script downloads with their checksum checks). Also confirm Phase 4 lists your
+custom services and their unit files exist in `backups/services/<unit>/unit`.
 
 ### 6.6 Run the restore for real
 
@@ -456,8 +462,8 @@ or error. This proves re-runs are safe (principle 6).
 
 ### 6.9 What to do with failures
 
-- A **custom/script installer** that fails prints a warning and restore **continues** —
-  note which app, fix its `install_command` in the inventory, re-run.
+- A **`script`/`deb`/`tarball` installer** that fails prints a warning and restore
+  **continues** — note which app, fix its `installer:` record in the inventory, re-run.
 - A **hard failure** (apt/snap install error) aborts — fix the cause, re-run (idempotent).
 - **Missing config?** Check the app declares `config_paths` in the inventory and that
   `backup.sh` captured it (the app appears under `backups/apps/<name>/`).
@@ -485,7 +491,7 @@ snapshot.
 | `unsupported architecture` / `unsupported Ubuntu release` | This repo hard-blocks platforms outside `SUPPORTED_ARCHS`/`SUPPORTED_UBUNTU_RELEASES` (amd64/arm64, Ubuntu 22.04/24.04). Use a supported machine or extend the constants in `lib/common.sh`. |
 | `No backups/ found — configuration cannot be restored` | You skipped step 2.3. Copy the newest snapshot into `backups/` and re-run. |
 | `no unit file in backups/ — skipping` | The service's unit file wasn't captured. Run `./backup.sh` on your working machine, re-copy `backups/`, re-run. |
-| `install command for '<app>' failed` | The official installer errored (network, missing dep). Fix the cause, re-run; restore continues with other items. |
+| `install script for '<app>' failed` / installer step errored | The typed installer failed (network, missing dep, checksum mismatch, key-fingerprint mismatch). Fix the cause, re-run; restore continues with other items. |
 | `Temporary failure resolving ...` / DNS errors mid-restore | Network/DNS dropped. Make the DNS fix **persistent** — a transient `nameserver` gets overwritten on reconnect/reboot and the restore fails again mid-run: set `nameserver 8.8.8.8` in a static `/etc/resolv.conf` (or via the connection: `nmcli connection modify ... ipv4.dns "8.8.8.8 1.1.1.1" ipv4.ignore-auto-dns yes`); if `systemd-resolved` itself crashes, disable it and use the static file. Then re-run restore (idempotent). Don't power-cycle while apt is mid-transaction. |
 | **"Authentication error" at the login screen before typing anything** | Interrupted package transaction — a restore died mid-apt and PAM/GDM is half-configured. Recovery: `Ctrl+Alt+F3` TTY → `sudo dpkg --configure -a` → `sudo apt-get install -f -y` → reboot. Prevent it by running restore from a TTY with the screen lock disabled (§ 4). |
 | VM boots but D-Bus/polkit/GDM fail (no login) | Interrupted package transaction (network drop mid-restore + power-cycle). TTY recovery: `Ctrl+Alt+F3` → `sudo dpkg --configure -a` → `sudo apt-get install -f -y` (if this still fails on DNS/network, fix networking first, then re-run) → reboot. Never power-cycle mid-upgrade. |

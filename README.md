@@ -15,9 +15,9 @@ A traditional backup copies files. This repo instead:
    installers — and then overwrites them with your saved configuration.
 
 > Example: you use **OpenCode**. The inventory says so. `backup.sh` saves
-> `~/.config/opencode`. On a fresh system, `restore.sh` runs
-> `curl -fsSL https://opencode.ai/install | bash` (latest version, official repo), then
-> restores your `~/.config/opencode` on top.
+> `~/.config/opencode`. On a fresh system, `restore.sh` runs the app's typed `script`
+> installer — downloads `https://opencode.ai/install` and executes it (latest version,
+> official source) — then restores your `~/.config/opencode` on top.
 
 This is how you'd set up a new machine by hand — automated, and only for the things
 **you** installed on top of stock Ubuntu. No version pinning, no dependency guessing, no
@@ -92,6 +92,7 @@ Keep everything current day-to-day:
 inventory/inventory.yaml   the single source of truth (user-maintained)
 inventory/schema.yaml      versioned JSON Schema (draft 2020-12) the inventory is validated against
 lib/common.sh              shared helpers for all scripts
+lib/installers.sh          typed installer functions for the structured installer: records
 lib/schema_check.py        real structural validator (python3 + jsonschema + PyYAML)
 lib/catalog.sh             built-in knowledge of common apps (opencode, code, docker, ...)
 inventory.sh               the manual inventory tool (list / add-* / remove-* / validate / review / wizard)

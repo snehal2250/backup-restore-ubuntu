@@ -10,9 +10,10 @@
 # VALIDATION: this file is checked against the VERSIONED JSON Schema in
 # inventory/schema.yaml (structural, via lib/schema_check.py — a real
 # validator) plus semantic checks in lib/common.sh validate_inventory()
-# (unique names, path ownership overlaps, default_shell provenance, ...).
-# Run: ./inventory.sh validate. `schema_version` MUST equal the version the
-# schema file implements; bump both together when the contract changes.
+# (unique names, path ownership overlaps, default_shell provenance, installer
+# template completeness, ...). Run: ./inventory.sh validate. `schema_version`
+# MUST equal the version the schema file implements; bump both together when
+# the contract changes.
 #
 # Editing rules (see AGENTS.md for the full context):
 #   * schema_version / profile -> fixed identity of the file (validated).
@@ -20,23 +21,28 @@
 #   * user_dirs: whole folders the user wants captured (e.g. ~/Documents), '~' form.
 #     Unlike app config_paths these are user DATA, not app config — backed up whole.
 #   * snap_packages supports the suffix ':classic' (e.g. code:classic)
-#   * apps:      install_type in apt|snap|snap-classic|flatpak|npm-global|pipx|cargo|script|custom
-#                script/custom requires install_command
-#                package: optional apt/snap/flatpak package name if it differs from the app name
+#   * apps:      EVERY app carries a structured `installer:` block — a typed,
+#     parameterized record (NO free-form shell). The install method is
+#     `installer.type` in:
+#       apt | snap | snap_classic | flatpak | npm_global | pipx | cargo |
+#       apt_repository | deb | tarball | script
+#     Package-based types optionally take `installer.package` (defaults to the
+#     app name). Download types take `installer.url` (+ checksum/unverified,
+#     {arch}/{version} templates, arch gates — see inventory/schema.yaml).
+#     `script` is the explicit LAST RESORT: it requires a pinned
+#     `installer.checksum` or `installer.unverified: true`.
 #                config_paths use '~' form and are the ONLY things backed up
 #                exclude: optional rsync exclude patterns (one per line) to keep caches,
 #                model stores and re-downloadable binaries OUT of the backup
 #                extensions: optional list of extension/model IDs to re-install AFTER restore
 #                  (VS Code extensions via 'code --install-extension', Azure CLI via
 #                  'az extension add', Ollama models via 'ollama pull'). IDs only — no versions.
-#                groups: optional list of Unix group names the user needs membership in
-#                  (e.g. docker). Restore will add the user to these groups.
 #                default_shell: optional (top-level), the login shell to set via chsh
 #                  (e.g. /usr/bin/fish). The shell package must be declared as an app.
 #   * services:  only CUSTOM services the user installed; target system|user
 # =============================================================================
 
-schema_version: 1          # must match inventory/schema.yaml (bump both together)
+schema_version: 2          # must match inventory/schema.yaml (bump both together)
 profile: workstation       # machine profile, validated against the schema
 
 default_shell: /usr/bin/fish
@@ -55,8 +61,10 @@ user_dirs:
 apps:
   - name: "opencode"
     description: "AI coding agent (opencode.ai)"
-    install_type: "script"
-    install_command: "curl -fsSL https://opencode.ai/install | bash"
+    installer:
+      type: script
+      url: "https://opencode.ai/install"
+      unverified: true
     check_cmd: "opencode"
     depends_apt:
       - "curl"
@@ -66,8 +74,9 @@ apps:
       - "node_modules"
   - name: "code"
     description: "Visual Studio Code"
-    install_type: "snap-classic"
-    package: "code"
+    installer:
+      type: snap_classic
+      package: "code"
     check_cmd: "code"
     config_paths:
       - "~/.config/Code"
@@ -79,32 +88,47 @@ apps:
       - "logs"
   - name: "git"
     description: "Git version control (official apt)"
-    install_type: "apt"
+    installer:
+      type: apt
     check_cmd: "git"
     config_paths:
       - "~/.gitconfig"
       - "~/.config/git"
   - name: "gh"
     description: "GitHub CLI (official apt repo)"
-    install_type: "custom"
-    install_command: "(type -p wget >/dev/null || (sudo apt-get update && sudo apt-get install -y wget)) && sudo mkdir -p -m 755 /etc/apt/keyrings && out=$(mktemp) && wget -nv -O $out https://cli.github.com/packages/githubcli-archive-keyring.gpg && cat $out | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null && sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null && sudo apt-get update && sudo apt-get install -y gh"
+    installer:
+      type: apt_repository
+      url: "https://cli.github.com/packages"
+      suite: "stable"
+      components:
+        - "main"
+      key_url: "https://cli.github.com/packages/githubcli-archive-keyring.gpg"
+      packages:
+        - "gh"
     check_cmd: "gh"
     depends_apt:
-      - "wget"
+      - "curl"
     config_paths:
       - "~/.config/gh"
   - name: "gcloud"
-    install_type: "snap-classic"
+    description: "Google Cloud CLI (classic snap)"
+    installer:
+      type: snap_classic
+      package: "google-cloud-cli"
     check_cmd: "gcloud"
     config_paths:
       - "~/.config/gcloud"
     exclude:
       - "logs"
-    package: google-cloud-cli
   - name: "go"
-    description: "Go toolchain (official go.dev tarball)"
-    install_type: "custom"
-    install_command: "VER=$(curl -fsSL https://go.dev/VERSION?m=text | head -1) && curl -fsSL -o /tmp/go.tar.gz https://go.dev/dl/${VER}.linux-$(dpkg --print-architecture).tar.gz && sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf /tmp/go.tar.gz && sudo ln -sf /usr/local/go/bin/go /usr/local/bin/go"
+    description: "Go toolchain (official go.dev tarball, latest stable)"
+    installer:
+      type: tarball
+      url: "https://go.dev/dl/{version}.linux-{arch}.tar.gz"
+      version_url: "https://go.dev/VERSION?m=text"
+      checksum_url: "https://go.dev/dl/{version}.linux-{arch}.tar.gz.sha256"
+      binary: "go/bin/go"
+      dest: "/usr/local"
     check_cmd: "go"
     depends_apt:
       - "curl"
@@ -114,8 +138,10 @@ apps:
       - "telemetry"
   - name: "uv"
     description: "Python package manager (official installer)"
-    install_type: "custom"
-    install_command: "curl -LsSf https://astral.sh/uv/install.sh | sh"
+    installer:
+      type: script
+      url: "https://astral.sh/uv/install.sh"
+      unverified: true
     check_cmd: "uv"
     depends_apt:
       - "curl"
@@ -123,15 +149,27 @@ apps:
       - "~/.config/uv"
   - name: "cloudflared"
     description: "Cloudflare Tunnel client (official apt repo)"
-    install_type: "custom"
-    install_command: "sudo mkdir -p --mode=0755 /usr/share/keyrings && curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null && echo \"deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main\" | sudo tee /etc/apt/sources.list.d/cloudflared.list && sudo apt-get update && sudo apt-get install -y cloudflared"
+    installer:
+      type: apt_repository
+      url: "https://pkg.cloudflare.com/cloudflared"
+      suite: "any"
+      components:
+        - "main"
+      key_url: "https://pkg.cloudflare.com/cloudflare-main.gpg"
+      packages:
+        - "cloudflared"
     check_cmd: "cloudflared"
     depends_apt:
       - "curl"
   - name: "mongodb-compass"
     description: "MongoDB GUI (official .deb, latest stable)"
-    install_type: "custom"
-    install_command: "DEB=$(curl -fsSL https://info-mongodb-com.s3.amazonaws.com/com-download-center/compass.json | grep -oE 'https://downloads.mongodb.com/compass/mongodb-compass_[0-9.]+_amd64.deb' | head -1) && [ -n \"$DEB\" ] && curl -fsSL -o /tmp/mongodb-compass.deb \"$DEB\" && sudo apt-get install -y /tmp/mongodb-compass.deb"
+    installer:
+      type: deb
+      url: "https://downloads.mongodb.com/compass/mongodb-compass_{version}_amd64.deb"
+      version_url: "https://info-mongodb-com.s3.amazonaws.com/com-download-center/compass.json"
+      version_query: ".versions[0]._id"
+      arch: "amd64"
+      unverified: true
     check_cmd: "mongodb-compass"
     depends_apt:
       - "curl"
@@ -143,12 +181,15 @@ apps:
       - "DawnWebGPUCache"
       - "DawnGraphiteCache"
   - name: "google-chrome"
-    description: "Google Chrome web browser"
-    install_type: "custom"
-    install_command: "wget -q -O /tmp/google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && sudo apt-get install -y /tmp/google-chrome.deb"
+    description: "Google Chrome web browser (official .deb)"
+    installer:
+      type: deb
+      url: "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
+      arch: "amd64"
+      unverified: true
     check_cmd: "google-chrome"
     depends_apt:
-      - "wget"
+      - "curl"
     config_paths:
       - "~/.config/google-chrome"
     exclude:
@@ -162,36 +203,46 @@ apps:
       - "GPUCache"
   - name: "fish"
     description: "Friendly interactive shell (official apt)"
-    install_type: "apt"
+    installer:
+      type: apt
     check_cmd: "fish"
     config_paths:
       - "~/.config/fish"
   - name: "sqlitebrowser"
     description: "DB Browser for SQLite (official apt)"
-    install_type: "apt"
+    installer:
+      type: apt
     check_cmd: "sqlitebrowser"
     config_paths:
       - "~/.config/sqlitebrowser"
   - name: "stacer"
     description: "System optimizer & monitor (official apt)"
-    install_type: "apt"
+    installer:
+      type: apt
     check_cmd: "stacer"
     config_paths:
       - "~/.config/stacer"
   - name: "sublime-text"
     description: "Sublime Text editor (official apt repo)"
-    install_type: "custom"
-    install_command: "sudo mkdir -p /etc/apt/keyrings && wget -qO - https://download.sublimetext.com/sublimehq-pub.gpg | sudo tee /etc/apt/keyrings/sublimehq-pub.asc > /dev/null && echo -e 'Types: deb\\nURIs: https://download.sublimetext.com/\\nSuites: apt/stable/\\nSigned-By: /etc/apt/keyrings/sublimehq-pub.asc' | sudo tee /etc/apt/sources.list.d/sublime-text.sources && sudo apt-get update && sudo apt-get install -y sublime-text"
+    installer:
+      type: apt_repository
+      url: "https://download.sublimetext.com/"
+      suite: "apt/stable/"
+      components: []
+      key_url: "https://download.sublimetext.com/sublimehq-pub.gpg"
+      packages:
+        - "sublime-text"
     check_cmd: "sublime_text"
     depends_apt:
-      - "wget"
+      - "curl"
     config_paths:
       - "~/.config/sublime-text"
     exclude:
       - "Log"
   - name: "freebuff"
     description: "Freebuff AI coding assistant CLI (npm)"
-    install_type: "npm-global"
+    installer:
+      type: npm_global
     check_cmd: "freebuff"
     depends_apt:
       - "nodejs"
@@ -205,8 +256,20 @@ apps:
       - "tree-sitter.wasm"
   - name: "docker"
     description: "Docker Engine + CLI (official Docker apt repo)"
-    install_type: "custom"
-    install_command: "sudo apt-get update && sudo apt-get install -y ca-certificates curl && sudo install -m 0755 -d /etc/apt/keyrings && sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc && sudo chmod a+r /etc/apt/keyrings/docker.asc && echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(grep VERSION_CODENAME /etc/os-release | cut -d= -f2) stable\" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null && sudo apt-get update && sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
+    installer:
+      type: apt_repository
+      url: "https://download.docker.com/linux/ubuntu"
+      suite: "codename"
+      components:
+        - "stable"
+      key_url: "https://download.docker.com/linux/ubuntu/gpg"
+      key_fingerprint: "9DC8 5822 9FC7 DD38 854A E2D8 8D81 803C 0EBF CD88"
+      packages:
+        - "docker-ce"
+        - "docker-ce-cli"
+        - "containerd.io"
+        - "docker-buildx-plugin"
+        - "docker-compose-plugin"
     check_cmd: "docker"
     depends_apt:
       - "curl"
@@ -216,13 +279,15 @@ apps:
       - "cli-plugins"
   - name: "tmux"
     description: "Terminal multiplexer (apt)"
-    install_type: "apt"
+    installer:
+      type: apt
     check_cmd: "tmux"
     config_paths:
       - "~/.tmux.conf"
   - name: "terraform"
     description: "HashiCorp Terraform IaC CLI"
-    install_type: "snap-classic"
+    installer:
+      type: snap_classic
     check_cmd: "terraform"
     config_paths:
       - "~/.terraform.d"
@@ -231,14 +296,22 @@ apps:
       - "checkpoint_signature"
   - name: "ollama"
     description: "Local LLM runner (snap)"
-    install_type: "snap"
+    installer:
+      type: snap
     check_cmd: "ollama"
     extensions:
       - "llama3.2"
   - name: "az"
     description: "Microsoft Azure CLI (official MS apt repo)"
-    install_type: "custom"
-    install_command: "curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash"
+    installer:
+      type: apt_repository
+      url: "https://packages.microsoft.com/repos/azure-cli"
+      suite: "codename"
+      components:
+        - "main"
+      key_url: "https://packages.microsoft.com/keys/microsoft.asc"
+      packages:
+        - "azure-cli"
     check_cmd: "az"
     depends_apt:
       - "curl"
@@ -253,28 +326,34 @@ apps:
       - "azure-devops"
   - name: "azurite"
     description: "Azure Storage emulator (npm)"
-    install_type: "npm-global"
+    installer:
+      type: npm_global
     check_cmd: "azurite"
     depends_apt:
       - "nodejs"
       - "npm"
   - name: "slack"
     description: "Slack desktop (snap)"
-    install_type: "snap"
+    installer:
+      type: snap
     check_cmd: "slack"
   - name: "onlyoffice"
     description: "OnlyOffice desktop editors (snap)"
-    install_type: "snap"
+    installer:
+      type: snap
+      package: "onlyoffice-desktopeditors"
     check_cmd: "onlyoffice-desktopeditors"
-    package: onlyoffice-desktopeditors
   - name: "storage-explorer"
     description: "Azure Storage Explorer (snap)"
-    install_type: "snap"
+    installer:
+      type: snap
     check_cmd: "storage-explorer"
   - name: "tailscale"
     description: "Tailscale mesh VPN (official installer)"
-    install_type: "script"
-    install_command: "curl -fsSL https://tailscale.com/install.sh | sh"
+    installer:
+      type: script
+      url: "https://tailscale.com/install.sh"
+      unverified: true
     check_cmd: "tailscale"
     depends_apt:
       - "curl"

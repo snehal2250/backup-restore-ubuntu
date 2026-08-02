@@ -9,6 +9,8 @@
 set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
+# shellcheck disable=SC1091
+source "$LIB_DIR/installers.sh"
 
 DRY_RUN=0
 ASSUME_YES=0
@@ -211,11 +213,11 @@ bootstrap_backends() {
     [ -n "$itype" ] || continue
     case "$itype" in
       flatpak) need_flatpak=1 ;;
-      npm-global) need_npm=1 ;;
+      npm_global) need_npm=1 ;;
       pipx) need_pipx=1 ;;
       cargo) need_cargo=1 ;;
     esac
-  done < <(yq -r '.apps[].install_type | select(. != null)' "$INVENTORY_FILE")
+  done < <(yq -r '.apps[].installer.type | select(. != null)' "$INVENTORY_FILE")
 
   if [ "$need_flatpak" = "1" ] && ! command -v flatpak >/dev/null 2>&1; then
     info "flatpak needed by declared apps — installing it."
@@ -240,13 +242,10 @@ bootstrap_backends() {
 }
 
 install_app() {
-  local name="$1" itype icmd check pkg
-  itype="$(app_get "$name" '.install_type')"
-  [ -n "$itype" ] || { warn "  app '$name' has no install_type — skipping."; mark_failure; return 1; }
-  icmd="$(app_get "$name" '.install_command')"
+  local name="$1" itype check
+  itype="$(app_get "$name" '.installer.type')"
+  [ -n "$itype" ] || { warn "  app '$name' has no installer.type — skipping."; mark_failure; return 1; }
   check="$(app_get "$name" '.check_cmd')"
-  pkg="$(app_get "$name" '.package')"
-  [ -n "$pkg" ] || pkg="$name"
 
   if [ "$CONFIGS_ONLY" = "1" ]; then
     if [ "$BACKUPS_VERIFIED" = "1" ]; then
@@ -264,58 +263,25 @@ install_app() {
     run sudo apt-get install -y "${deps[@]}" || { warn "  $name: dependency install failed"; mark_failure; }
   fi
 
-  if { [ "$itype" = "script" ] || [ "$itype" = "custom" ]; } && [ -z "$check" ]; then
-    warn "  $name: script/custom installer with NO check_cmd — re-runs will re-run the installer (add check_cmd in the inventory)."
+  if [ "$itype" = "script" ] && [ -z "$check" ]; then
+    warn "  $name: script installer with NO check_cmd — re-runs will re-run the installer (add check_cmd in the inventory)."
   fi
 
   # Source-specific check: don't skip just on command -v.
   if is_app_installed_by_source "$name"; then
     ok "  $name: already installed (verified via $itype)"
   else
-    local install_ok=1
-    case "$itype" in
-      apt)
-        run sudo apt-get install -y "$pkg" || install_ok=0 ;;
-      snap)
-        if command -v snap >/dev/null 2>&1; then
-          run sudo snap install "$pkg" || install_ok=0
-        else
-          warn "  $name: snap not available — cannot install."
-          install_ok=0
-        fi ;;
-      snap-classic)
-        if command -v snap >/dev/null 2>&1; then
-          run sudo snap install --classic "$pkg" || install_ok=0
-        else
-          warn "  $name: snap not available — cannot install."
-          install_ok=0
-        fi ;;
-      flatpak)
-        run flatpak install -y flathub "$pkg" || install_ok=0 ;;
-      npm-global)
-        run sudo npm install -g "$pkg"@latest || install_ok=0 ;;
-      pipx)
-        run pipx install "$pkg" || install_ok=0 ;;
-      cargo)
-        run cargo install "$pkg" || install_ok=0 ;;
-      script|custom)
-        [ -n "$icmd" ] || { warn "  app '$name' uses install_type '$itype' but has no install_command."; mark_failure; return 1; }
-        if [ "$DRY_RUN" = "1" ]; then
-          printf '[dry-run] install %s: %s\n' "$name" "$icmd"
-        else
-          info "  $name: running official installer..."
-          bash -o pipefail -c "$icmd" || { warn "  install command for '$name' failed (exit $?)."; install_ok=0; }
-        fi
-        ;;
-      *) warn "  app '$name': unknown install_type '$itype' — skipping."; mark_failure; return 1 ;;
-    esac
-
-    if [ "$install_ok" = "0" ]; then
-      mark_failure
-    elif [ -n "$check" ] && ! command -v "$check" >/dev/null 2>&1; then
-      warn "  $name: installer succeeded but '$check' not found — may need a new shell or PATH update."
+    # Typed installer (lib/installers.sh) — prints its own dry-run steps.
+    if installer_run "$name"; then
+      if [ "$DRY_RUN" = "1" ]; then
+        printf '[dry-run] %s: would be installed (steps above)\n' "$name"
+      elif [ -n "$check" ] && ! command -v "$check" >/dev/null 2>&1; then
+        warn "  $name: installer succeeded but '$check' not found — may need a new shell or PATH update."
+      else
+        ok "  $name: installed."
+      fi
     else
-      ok "  $name: installed."
+      mark_failure
     fi
   fi
 

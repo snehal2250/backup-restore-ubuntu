@@ -21,7 +21,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   (`groups`, `user_dirs`), and structured lists (`apps`, `services`) including optional
   `extensions` per app (VS Code extension IDs, Azure CLI extension IDs, Ollama model names).
 - `lib/catalog.sh` — seed catalog so `add-app` knows common apps out of the box.
-- **Live inventory: 24 apps + 1 service declared** with group + shell state.
+- **Live inventory: 25 apps + 2 services declared** with group + shell state.
 - `inventory.sh` — the manual tool: `list`, `validate`, `add-package`, `remove-package`,
   `add-app` (wizard with catalog prefill + config-path detection + dependency prompt),
   `add-service` (validates unit name), `remove-app`, `remove-service`, `review`, `wizard`.
@@ -60,12 +60,21 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   rollback on failure, cleanup trap for interrupted runs; directory fsync documented as an
   optional extra for stronger crash consistency.
 - ✅ Concurrency protection via `flock`.
+- ✅ Structured installers (schema v2): replaced the opaque `script`/`custom`
+  `install_command` shell pipelines with typed `installer:` records — `apt`, `snap`,
+  `snap_classic`, `flatpak`, `npm_global`, `pipx`, `cargo`, `apt_repository` (signed
+  third-party repo: key download + optional gpg key-fingerprint verification + sources
+  line), `deb` (arch gate, pinned sha256 or `unverified: true`), `tarball`
+  (`{arch}`/`{version}` templates, checksum/checksum_url, safe top-level-dir swap,
+  binary symlink), and `script` as the explicit last resort (downloaded to a file, never
+  piped; checksum or `unverified: true`). Dispatched by the new `lib/installers.sh`;
+  `inventory.sh` wizard + catalog emit the same structured records.
 - ✅ Inventory validation, v2: **versioned JSON Schema** (`inventory/schema.yaml`,
-  draft 2020-12, `schema_version: 1` + `profile: workstation`) enforced with a REAL
+  draft 2020-12, `schema_version: 2` + `profile: workstation`) enforced with a REAL
   validator (`lib/schema_check.py`, python3 + reference `jsonschema` library) replacing
   ad-hoc structural parsing; plus strict semantic checks (unique names,
   `default_shell` provenance, config-path/`exclude` nesting, cross-owner path overlap
-  with the explicit exclude-allowance rule, interactive-installer detection,
+  with the explicit exclude-allowance rule, {version} template completeness,
   supported arch/Ubuntu-release gate).
 - ✅ Path safety: reject `..`, control chars, containment checks.
 - ✅ Architecture detection for yq bootstrap (amd64 + arm64).
