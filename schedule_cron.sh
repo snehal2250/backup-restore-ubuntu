@@ -36,6 +36,7 @@ Environment=BACKUP_KEEP=${BACKUP_KEEP:-5}
 Environment=HOME=$HOME
 Environment=USER=$USER
 Environment=YQ_AUTO=1
+Environment=SCHEMA_AUTO=1
 StandardOutput=append:$REPO_ROOT/backups/timer-backup.log
 StandardError=append:$REPO_ROOT/backups/timer-backup.log
 

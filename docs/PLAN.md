@@ -54,8 +54,19 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ `--packages-only` services are NOT enabled/started (need config first).
 - ✅ Root config ownership warning instead of silent failure.
 - ✅ Transactional backup: staging → validate → mirror → atomic swap.
+- ✅ Hardened publication (`publish_backup`): fail-fast first rename (never moves staging
+  over an existing live dir), same-filesystem verification for atomic renames, deterministic
+  rollback, keep-old-generation until final manifest verification (`status: ok`) with
+  rollback on failure, cleanup trap for interrupted runs; directory fsync documented as an
+  optional extra for stronger crash consistency.
 - ✅ Concurrency protection via `flock`.
-- ✅ Inventory schema validation (`inventory.sh validate`).
+- ✅ Inventory validation, v2: **versioned JSON Schema** (`inventory/schema.yaml`,
+  draft 2020-12, `schema_version: 1` + `profile: workstation`) enforced with a REAL
+  validator (`lib/schema_check.py`, python3 + reference `jsonschema` library) replacing
+  ad-hoc structural parsing; plus strict semantic checks (unique names,
+  `default_shell` provenance, config-path/`exclude` nesting, cross-owner path overlap
+  with the explicit exclude-allowance rule, interactive-installer detection,
+  supported arch/Ubuntu-release gate).
 - ✅ Path safety: reject `..`, control chars, containment checks.
 - ✅ Architecture detection for yq bootstrap (amd64 + arm64).
 - ✅ Non-Ubuntu systems: `require_ubuntu` hard-fails (was a warning).

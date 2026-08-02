@@ -1,0 +1,226 @@
+# =============================================================================
+# inventory/schema.yaml — versioned JSON Schema (draft 2020-12) for
+# inventory/inventory.yaml.
+#
+# This is the STRUCTURAL contract for the inventory. Every declaration is
+# checked against it (with a real validator — lib/schema_check.py on python3 +
+# the reference `jsonschema` library) BEFORE any semantic validation or any
+# backup/restore step runs.
+#
+# Versioning: the inventory's `schema_version: N` must equal the version this
+# file implements ($id carries it too). Bumping the contract means:
+#   1. increment `schema_version` in inventory.yaml AND the `$id` here,
+#   2. extend this file, and
+#   3. update AGENTS.md / docs to match.
+#
+# Semantic rules that a schema cannot express — unique app/service names,
+# default_shell provided by a declared package, overlapping path ownership,
+# config nested under an excluded path, interactive install commands, supported
+# arch/Ubuntu release — are enforced in validate_inventory() in lib/common.sh.
+# This file is structure only.
+# =============================================================================
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "https://backup-restore-ubuntu.local/schema/inventory-v1"
+title: "Backup-Restore-Ubuntu inventory schema (v1)"
+description: "Structural contract for inventory/inventory.yaml, profile: workstation."
+
+type: object
+additionalProperties: false
+# All top-level lists are REQUIRED (empty allowed): the scripts read them with
+# plain yq expressions like `.apps[]`, so a schema-valid inventory must always
+# declare them. The shipped inventory declares every one of them.
+required:
+  - schema_version
+  - profile
+  - apt_packages
+  - snap_packages
+  - flatpak_apps
+  - dotfiles
+  - groups
+  - user_dirs
+  - apps
+  - services
+
+properties:
+  schema_version:
+    const: 1
+    description: "Must equal the version implemented by this schema file."
+  profile:
+    enum:
+      - workstation
+    description: "Machine profile. New profiles bump schema_version."
+  default_shell:
+    type: [string, "null"]
+    pattern: "^/(usr/bin|bin)/[a-zA-Z0-9._-]+$"
+    description: "Absolute shell path; its package must be a declared app or apt package (semantic check)."
+  apt_packages:
+    type: array
+    items:
+      type: string
+      pattern: "^[a-z0-9][a-z0-9+.-]*$"
+  snap_packages:
+    type: array
+    items:
+      type: string
+      pattern: "^[a-z0-9][a-z0-9-]*(:classic)?$"
+    description: "Entries may carry the ':classic' suffix for classic confinement."
+  flatpak_apps:
+    type: array
+    items:
+      type: string
+      pattern: "^[a-zA-Z0-9][a-zA-Z0-9.]*$"
+    description: "Reverse-DNS app IDs, e.g. org.gimp.GIMP."
+  dotfiles:
+    type: array
+    items:
+      type: string
+      pattern: "^(?!.*\\.\\.)[a-zA-Z0-9._-]+(/[a-zA-Z0-9._-]+)*$"
+    description: "Relative path under $HOME; no leading slash, no '..' traversal."
+  groups:
+    type: array
+    items:
+      type: string
+      pattern: "^[a-z_][a-z0-9_-]{0,31}$"
+  user_dirs:
+    type: array
+    items:
+      type: string
+      pattern: "^(?!.*\\.\\.)~/[^\\x00-\\x1f]+$"
+    description: "Whole user-data folders; must use the ~/ form, never '~' itself, and never '..'."
+  apps:
+    type: array
+    items:
+      $ref: "#/$defs/app"
+  services:
+    type: array
+    items:
+      $ref: "#/$defs/service"
+
+$defs:
+  app:
+    type: object
+    additionalProperties: false
+    description: "One main application. Allowed keys depend on install_type (see allOf)."
+    required:
+      - name
+      - install_type
+    properties:
+      name:
+        type: string
+        pattern: "^[a-zA-Z0-9._-]+$"
+      description:
+        type: string
+      install_type:
+        enum: [apt, snap, snap-classic, flatpak, npm-global, pipx, cargo, script, custom]
+      install_command:
+        type: string
+        minLength: 1
+        description: "Required for script/custom; forbidden otherwise."
+      check_cmd:
+        type: string
+        pattern: "^[a-zA-Z0-9._-]+$"
+      package:
+        type: string
+        description: "Source package name when it differs from the app name; apt/snap/snap-classic/flatpak only. The exact pattern depends on install_type (see allOf)."
+      depends_apt:
+        type: array
+        items:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9+.-]*$"
+      config_paths:
+        type: array
+        items:
+          type: string
+          pattern: "^(?!.*\\.\\.)(~|~/[^\\x00-\\x1f]*|/[^\\x00-\\x1f]*)$"
+        description: "Exactly '~', '~/...', or an absolute '/...' path; never '~foo' or '..', no control characters. NOTE: a lone '~' must be QUOTED as \"~\" in YAML — bare ~ parses as null."
+      exclude:
+        type: array
+        items:
+          type: string
+          pattern: "^(?!.*\\.\\.)[^~/][^\\x00-\\x1f]*$"
+        description: "Relative rsync patterns (globs allowed); never absolute or '..'-containing."
+      extensions:
+        type: array
+        items:
+          type: string
+          pattern: "^[a-zA-Z0-9][a-zA-Z0-9._@-]*$"
+    allOf:
+      # install_command: required AND only for script/custom installers.
+      - if:
+          properties:
+            install_type:
+              enum: [script, custom]
+          required: [install_type]
+        then:
+          required: [install_command]
+        else:
+          properties:
+            install_command: false
+      # package: install-type-specific identifier pattern, and ONLY for
+      # apt/snap/snap-classic/flatpak (each source has its own naming rules).
+      - if:
+          properties:
+            install_type:
+              const: apt
+          required: [install_type]
+        then:
+          properties:
+            package:
+              type: string
+              pattern: "^[a-z0-9][a-z0-9+.-]*$"
+      - if:
+          properties:
+            install_type:
+              enum: [snap, snap-classic]
+          required: [install_type]
+        then:
+          properties:
+            package:
+              type: string
+              pattern: "^[a-z0-9][a-z0-9-]*$"
+      - if:
+          properties:
+            install_type:
+              const: flatpak
+          required: [install_type]
+        then:
+          properties:
+            package:
+              type: string
+              pattern: "^[a-zA-Z0-9][a-zA-Z0-9.]*$"
+              description: "Flatpak app IDs are reverse-DNS (e.g. org.gimp.GIMP) and may contain uppercase."
+      # NOTE: if a new install_type is ever added to the top-level enum, it must
+      # also be added to the not-enum list below, or `package` becomes silently
+      # forbidden for it.
+      - if:
+          properties:
+            install_type:
+              not:
+                enum: [apt, snap, snap-classic, flatpak]
+          required: [install_type]
+        then:
+          properties:
+            package: false
+
+  service:
+    type: object
+    additionalProperties: false
+    description: "A custom systemd unit the user installed (never a default service)."
+    required:
+      - unit
+    properties:
+      unit:
+        type: string
+        pattern: "^[a-zA-Z0-9@._:-]+\\.(service|timer|socket|path)$"
+      target:
+        enum: [user, system]
+      enable:
+        type: boolean
+      start:
+        type: boolean
+      config_paths:
+        type: array
+        items:
+          type: string
+          pattern: "^(?!.*\\.\\.)(~|~/[^\\x00-\\x1f]*|/[^\\x00-\\x1f]*)$"
+        description: "Exactly '~', '~/...', or an absolute '/...' path; never '~foo' or '..'. NOTE: a lone '~' must be QUOTED as \"~\" in YAML."

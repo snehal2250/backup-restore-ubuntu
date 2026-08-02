@@ -12,6 +12,7 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
 YQ_AUTO=2   # interactive tool: if yq is missing, ask the user to install it
+SCHEMA_AUTO=2   # schema validator: ask before installing python3-jsonschema
 
 [ -f "$INVENTORY_FILE" ] || die "Inventory file not found: $INVENTORY_FILE"
 require_yq "$YQ_AUTO"
@@ -275,28 +276,21 @@ mirror_backup() {
 mirror_backup
 
 # --- Atomic publication: swap staging -> live ----------------------------
-# Write final manifest to staging.
+# Write the final manifest into the staged generation, then publish it:
+# fail-fast first rename, same-filesystem check, deterministic rollback,
+# cleanup trap, and the previous generation is kept until the new one passes
+# manifest verification (see publish_backup in lib/common.sh).
 manifest_final "$BACKUP_RUN_ID" "$MIRROR_STATUS" "$ARTIFACTS" > "$STAGE/backup-info.txt"
-
-# Atomically swap the old backups/ with the new staging tree.
-if [ -d "$BACKUPS_DIR" ]; then
-  _old_stage="$REPO_ROOT/backups.old.$$"
-  mv "$BACKUPS_DIR" "$_old_stage" 2>/dev/null || true
-  if mv "$STAGE" "$BACKUPS_DIR" 2>/dev/null; then
-    rm -rf "$_old_stage" 2>/dev/null || true
-  else
-    mv "$_old_stage" "$BACKUPS_DIR" 2>/dev/null || true
-    die "Failed to publish the new backup — the previous backup has been preserved."
-  fi
-else
-  mv "$STAGE" "$BACKUPS_DIR"
-fi
-rm -f "$ARTIFACTS"
+publish_backup
 
 release_lock
 
 echo
-ok "Backup complete."
+if grep -q '^status: ok$' "$BACKUP_MANIFEST" 2>/dev/null; then
+  ok "Backup complete."
+else
+  warn "Backup finished with issues — see backup-info.txt (restore would need --force-incomplete)."
+fi
 _lines_total="$(wc -l < "$BACKUP_MANIFEST" 2>/dev/null || echo 0)"
 echo "  Artifacts captured — see backup-info.txt for details."
 echo "  Mirror: ${MIRROR_STATUS} — BACKUP_DEST=${BACKUP_DEST:-<disabled>}, keeping ${BACKUP_KEEP} snapshot(s)."

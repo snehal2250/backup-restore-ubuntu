@@ -34,6 +34,11 @@ done
 
 [ -f "$INVENTORY_FILE" ] || die "Inventory file not found: $INVENTORY_FILE"
 require_yq 1
+SCHEMA_AUTO=1   # schema validator: auto-install python3-jsonschema on a fresh system
+
+# Note: require_schema_validator (called via validate_inventory below) may also
+# auto-install python3-jsonschema python3-yaml on a fresh system — the same
+# policy as yq: validation must run even under --dry-run.
 
 # --- Preflight: OS and user ----------------------------------------------
 require_ubuntu

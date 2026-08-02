@@ -58,14 +58,20 @@ newest=$(ls -1dr /media/vikram-athare/Storage/backup-restore-ubuntu/backup-* | h
 tail -5 "$newest/backup-info.txt"
 ```
 
-> If `backup-info.txt` has **no** `status: ok` line, the last run did not complete —
-> re-run `./backup.sh` and fix whatever it reports before restoring from a snapshot.
+> If `backup-info.txt` reports `status: degraded`, the last run **completed** but some
+> declared paths were missing/incomplete — re-run `./backup.sh` and fix what it reports
+> (or restore with `--force-incomplete`). If the file is **missing entirely**, no
+> completed, verified run exists — re-run `./backup.sh` before restoring from a snapshot.
 >
-> **Local vs. snapshot marker:** the local `backups/backup-info.txt` reflects the **last
-> run** (a new run truncates it immediately; only a completed run re-appends `status: ok`).
-> The newest mirror snapshot only receives the marker on a successful run — so check the
-> **local** file for the truth about the most recent run, and only then verify the snapshot
-> you are about to restore from carries a matching marker.
+> **Local vs. snapshot marker:** the local `backups/backup-info.txt` reflects the last
+> **completed, verified** run. `backup.sh` never truncates it mid-run — the `in_progress`
+> marker is written to the staging manifest instead — and it is replaced atomically only
+> when a run finishes successfully. A run that aborts during capture leaves the previous
+> `status: ok` marker intact; a missing local file means no completed run exists (or the
+> run died inside the atomic swap). The newest mirror snapshot only receives the marker on
+> a successful run — so check the **local** file for the truth about the most recent run,
+> and only then verify the snapshot you are about to restore from carries a matching
+> marker.
 
 The mirror lives at `BACKUP_DEST` (default `/media/vikram-athare/Storage/backup-restore-ubuntu`)
 as timestamped snapshots, keeping the newest `BACKUP_KEEP` (default 5). The newest
@@ -122,6 +128,12 @@ cp -a "$newest/." backups/
   for both a real run **and** `--dry-run` (a preview still needs to parse the inventory),
   so you normally don't need to do anything. If the auto-install fails (no `snap`, no
   `curl`), install it manually: `sudo snap install yq`.
+- **Schema validator** — `restore.sh` validates the inventory against the versioned
+  JSON Schema (`inventory/schema.yaml`) with `lib/schema_check.py` (python3 + the
+  `jsonschema` library). On a fresh system it **auto-installs**
+  `python3-jsonschema python3-yaml` via apt (same policy as `yq`: needed even for
+  `--dry-run`). Install manually if needed:
+  `sudo apt-get install -y python3-jsonschema python3-yaml`.
 - Network access to the repos the inventory uses (apt, Snap Store, Flathub, official
   installers).
 
@@ -468,6 +480,9 @@ snapshot.
 | Symptom | Cause / fix |
 | --- | --- |
 | `yq is required...` at the top | restore failed to auto-install yq (no snap + no curl?). Install it: `sudo snap install yq`, then re-run. |
+| `Inventory schema validation needs python3 with the 'jsonschema' and 'yaml' modules` | restore could not auto-install the schema validator. Install it manually: `sudo apt-get install -y python3-jsonschema python3-yaml`, then re-run. |
+| `Inventory failed schema validation` / `schema check FAILED` | `inventory.yaml` violates `inventory/schema.yaml` (wrong `schema_version`/`profile`, invalid package/unit/group/path, disallowed key for the install type...). Run `./inventory.sh validate` on your working machine, fix, re-run `backup.sh`, and bring a fresh snapshot. |
+| `unsupported architecture` / `unsupported Ubuntu release` | This repo hard-blocks platforms outside `SUPPORTED_ARCHS`/`SUPPORTED_UBUNTU_RELEASES` (amd64/arm64, Ubuntu 22.04/24.04). Use a supported machine or extend the constants in `lib/common.sh`. |
 | `No backups/ found — configuration cannot be restored` | You skipped step 2.3. Copy the newest snapshot into `backups/` and re-run. |
 | `no unit file in backups/ — skipping` | The service's unit file wasn't captured. Run `./backup.sh` on your working machine, re-copy `backups/`, re-run. |
 | `install command for '<app>' failed` | The official installer errored (network, missing dep). Fix the cause, re-run; restore continues with other items. |

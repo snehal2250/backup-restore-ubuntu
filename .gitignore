@@ -1,4 +1,14 @@
 # Captured configuration output from backup.sh — can contain secrets, keep out of git.
 backups/
+
+# Transactional staging + artifact tracker written during a backup run. backup.sh
+# cleans both on the next run, but a crashed/interrupted run leaves them behind —
+# backups.staging/ can hold thousands of captured files. Never commit them.
+backups.staging/
+backups.artifacts
+
+# Runtime flock lock file (created while a backup run is active).
+.backup.lock
+
 # Legacy single-backup folder from the old script (superseded by backups/) — never re-add.
 backup/

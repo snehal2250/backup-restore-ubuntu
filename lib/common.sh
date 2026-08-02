@@ -14,6 +14,7 @@ set -euo pipefail
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$LIB_DIR/.." && pwd)"
 INVENTORY_FILE="$REPO_ROOT/inventory/inventory.yaml"
+INVENTORY_SCHEMA="$REPO_ROOT/inventory/schema.yaml"   # versioned JSON Schema (draft 2020-12)
 # shellcheck disable=SC2034  # consumed by backup.sh / restore.sh after sourcing
 BACKUPS_DIR="$REPO_ROOT/backups"
 BACKUP_MANIFEST="$BACKUPS_DIR/backup-info.txt"
@@ -79,6 +80,10 @@ run() {
 
 # --- yq bootstrap ---------------------------------------------------------
 YQ_AUTO=0
+
+# Schema-validation bootstrap mode, mirrors YQ_AUTO:
+#   0 = die if the validator is missing, 1 = auto-install, 2 = ask first.
+SCHEMA_AUTO=0
 
 require_yq() {
   local mode="${1:-$YQ_AUTO}"
@@ -177,57 +182,274 @@ validate_path_contained() {
 }
 
 # --- Inventory validation ------------------------------------------------
+# Two layers:
+#   1. STRUCTURAL — a versioned JSON Schema (inventory/schema.yaml, draft
+#      2020-12) enforced with a real validator (lib/schema_check.py on python3 +
+#      the reference `jsonschema` library). No ad-hoc parsing for structure.
+#   2. SEMANTIC — rules a schema cannot express (unique names, path overlap,
+#      default_shell provenance, interactive installers, platform support...).
+
+# Supported platforms for the strict semantic platform check. Extend these
+# constants when a platform becomes supported (keep them in sync with the
+# yq bootstrap in require_yq, which knows amd64/arm64).
+SUPPORTED_ARCHS="amd64 arm64"
+SUPPORTED_UBUNTU_RELEASES="22.04 24.04"
+
+# _schema_python: print the python3 interpreter that has the jsonschema + yaml
+# modules (the real validator), or fail. Tries PATH python3 first, then
+# /usr/bin/python3 (PATH can be minimal under systemd user timers).
+_schema_python() {
+  if command -v python3 >/dev/null 2>&1 && python3 -c 'import jsonschema, yaml' >/dev/null 2>&1; then
+    command -v python3
+    return 0
+  fi
+  if [ -x /usr/bin/python3 ] && /usr/bin/python3 -c 'import jsonschema, yaml' >/dev/null 2>&1; then
+    printf '%s\n' '/usr/bin/python3'
+    return 0
+  fi
+  return 1
+}
+
+# require_schema_validator [mode]: ensure a real schema validator exists.
+# Mode: 0 = die, 1 = auto-install (apt), 2 = confirm first. Defaults to SCHEMA_AUTO.
+require_schema_validator() {
+  local mode="${1:-$SCHEMA_AUTO}"
+  if _schema_python >/dev/null; then
+    return 0
+  fi
+  if [ "$mode" = "0" ]; then
+    die "Inventory schema validation needs python3 with the 'jsonschema' and 'yaml' modules. Install with: sudo apt-get install -y python3-jsonschema python3-yaml"
+  fi
+  if [ "$mode" = "2" ]; then
+    confirm "Inventory schema validation needs python3 + jsonschema + yaml. Install python3-jsonschema python3-yaml now?" "n" || die "Aborted — install the validator and re-run."
+  else
+    info "python3 jsonschema/yaml not found — installing python3-jsonschema python3-yaml."
+  fi
+  require_cmd sudo
+  require_cmd apt-get
+  sudo apt-get update
+  sudo apt-get install -y python3-jsonschema python3-yaml
+  _schema_python >/dev/null || die "Schema validator still unavailable after the install. Run: sudo apt-get install -y python3-jsonschema python3-yaml"
+}
+
+# validate_schema_structure: run the real schema validator on the inventory.
+# Returns 0 on success, 1 on any structural violation (output is printed).
+validate_schema_structure() {
+  require_schema_validator
+  [ -f "$INVENTORY_SCHEMA" ] || die "Inventory schema not found: $INVENTORY_SCHEMA"
+  local py rc=0 out
+  py="$(_schema_python)" || return 1
+  out="$( "$py" "$LIB_DIR/schema_check.py" "$INVENTORY_SCHEMA" "$INVENTORY_FILE" 2>&1 )" || rc=1
+  printf '%s\n' "$out"
+  return "$rc"
+}
+
+# check_system_support: strict platform gate (arch + Ubuntu release).
+# Note: uses here-strings, never `cmd | grep -q` — under `set -o pipefail` a
+# grep that exits on its first match SIGPIPEs a slow upstream writer (e.g. the
+# snap yq) and turns a match into a 141 "failure".
+check_system_support() {
+  local errs=0 os_id="" os_ver="" supported
+  supported="$(printf '%s\n' $SUPPORTED_ARCHS)"
+  if ! grep -Fqx "$ARCH_NORM" <<< "$supported"; then
+    warn "  unsupported architecture: '$ARCH_NORM' (supported: $(printf '%s' "$SUPPORTED_ARCHS" | tr ' ' '/'))"
+    errs=$((errs + 1))
+  fi
+  if [ -r /etc/os-release ]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    os_id="${ID:-}"
+    os_ver="${VERSION_ID:-}"
+  fi
+  if [ "$os_id" != "ubuntu" ]; then
+    warn "  unsupported OS: '${os_id:-unknown}' (this repo targets Ubuntu)"
+    errs=$((errs + 1))
+  else
+    supported="$(printf '%s\n' $SUPPORTED_UBUNTU_RELEASES)"
+    if ! grep -Fqx "$os_ver" <<< "$supported"; then
+      warn "  unsupported Ubuntu release: '${os_ver:-unknown}' (supported: $(printf '%s' "$SUPPORTED_UBUNTU_RELEASES" | tr ' ' '/'))"
+      errs=$((errs + 1))
+    fi
+  fi
+  return "$(( errs > 0 ? 1 : 0 ))"
+}
+
+# check_interactive_commands: restore runs unattended, so script/custom
+# installers must not need a human at a prompt. Catches known interactive TUI
+# binaries and package-manager invocations without their -y/--yes flag.
+# HEURISTIC, NOT EXHAUSTIVE: it cannot know about every prompt (e.g. 'npm
+# login', 'az login' or a custom installer's own prompts), so a clean pass does
+# not prove a command is non-interactive.
+# Note: install_command is free text (may contain quotes) — never send it
+# through yq @tsv (it quotes double-quote fields); join columns with paste.
+check_interactive_commands() {
+  local errs=0 name icmd tok
+  local interactive_tokens="read select zenity whiptail dialog kdialog yad gum fzf ssh scp sftp"
+  local rs=$'\x1f'
+  while IFS="$rs" read -r name icmd; do
+    [ -n "$name" ] || continue
+    [ -n "$icmd" ] || continue
+    for tok in $interactive_tokens; do
+      if grep -Eq "(^|[;&|[:space:]])${tok}([[:space:]]|$)" <<< "$icmd"; then
+        warn "  app '$name': install_command invokes interactive tool '$tok' — restore runs unattended and cannot answer prompts"
+        errs=$((errs + 1))
+      fi
+    done
+    if grep -Eq "(^|[;&|[:space:]])apt(-get)? (install|remove|purge|autoremove)([[:space:]]|$)" <<< "$icmd" \
+       && ! grep -Eq -- '-y|--yes|--assume-yes|-qq' <<< "$icmd"; then
+      warn "  app '$name': apt install without -y/--yes — restore runs unattended and cannot confirm the prompt"
+      errs=$((errs + 1))
+    fi
+    if grep -Eq "(^|[;&|[:space:]])flatpak (install|uninstall|update)([[:space:]]|$)" <<< "$icmd" \
+       && ! grep -Eq -- '-y|--assumeyes|--noninteractive' <<< "$icmd"; then
+      warn "  app '$name': flatpak install without -y — restore runs unattended and cannot confirm the prompt"
+      errs=$((errs + 1))
+    fi
+  done < <(paste -d "$rs" \
+    <(yq -r '.apps[] | .name' "$INVENTORY_FILE") \
+    <(yq -r '.apps[] | (.install_command // "")' "$INVENTORY_FILE"))
+  return "$(( errs > 0 ? 1 : 0 ))"
+}
+
+# check_config_under_excluded: an app's own config_path must not sit under one
+# of its own exclude patterns — rsync would strip it and it could never be
+# backed up (silently producing an empty/partial artifact).
+check_config_under_excluded() {
+  local errs=0 name
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    local -a excl=()
+    local e
+    while IFS= read -r e; do
+      [ -n "$e" ] && excl+=("$e")
+    done < <(app_get "$name" '.exclude[]?')
+    [ "${#excl[@]}" -gt 0 ] || continue
+    local p
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      local expanded rel
+      expanded="$(expand_path "$p")"
+      if [[ "$expanded" == "$HOME/"* ]]; then
+        rel="${expanded#"$HOME"/}"
+      else
+        rel="${expanded#/}"
+      fi
+      local c
+      local -a comp=()
+      IFS='/' read -ra comp <<< "$rel"
+      for c in "${comp[@]}"; do
+        local ex
+        for ex in "${excl[@]}"; do
+          # shellcheck disable=SC2254  # exclude patterns may be globs
+          if [[ "$c" == $ex ]]; then
+            warn "  app '$name': config_path '$p' contains excluded component '$ex' — it will never be backed up; remove the config_path or the exclude"
+            errs=$((errs + 1))
+            c=""
+            break
+          fi
+        done
+        [ -n "$c" ] || break
+      done
+    done < <(app_get "$name" '.config_paths[]?')
+  done < <(yaml_list '.apps[] | .name')
+  return "$(( errs > 0 ? 1 : 0 ))"
+}
+
+# check_config_overlaps: cross-owner path ownership (apps, services, user_dirs).
+#   - the exact same expanded path declared twice                    -> error
+#   - one declared path nested under another owner's path            -> error,
+#     UNLESS the outer owner is an app whose exclude list covers the nested
+#     component (the deliberate "split ownership" case, e.g. freebuff's
+#     ~/.config/manicode + user_dir ~/.config/manicode/projects with
+#     exclude: projects).
+check_config_overlaps() {
+  local errs=0
+  declare -a types=() owners=() paths=() labels=()
+  declare -A app_excludes=()
+  local name unit d e p
+  # Fields are joined with a literal tab (config paths/excludes can never
+  # contain control chars — the schema forbids them — so tab is a safe
+  # separator; never use @tsv, which quotes double-quote fields).
+  # _norm_overlap_path: expand + strip a trailing slash so ~/foo and ~/foo/
+  # compare equal (a lone "/" stays "/").
+  _norm_overlap_path() {
+    local x
+    x="$(expand_path "$1")"
+    x="${x%/}"
+    [ -n "$x" ] || x="/"
+    printf '%s\n' "$x"
+  }
+  while IFS=$'\t' read -r name p; do
+    [ -n "$p" ] || continue
+    types+=(app); owners+=("$name"); paths+=("$(_norm_overlap_path "$p")"); labels+=("app '$name'")
+  done < <(yq -r '.apps[] | . as $a | .config_paths[]? | $a.name + "\t" + .' "$INVENTORY_FILE")
+  while IFS=$'\t' read -r name e; do
+    [ -n "$name" ] && [ -n "$e" ] && app_excludes["$name"]+=" $e"
+  done < <(yq -r '.apps[] | . as $a | .exclude[]? | $a.name + "\t" + .' "$INVENTORY_FILE")
+  while IFS=$'\t' read -r unit p; do
+    [ -n "$p" ] || continue
+    types+=(service); owners+=("$unit"); paths+=("$(_norm_overlap_path "$p")"); labels+=("service '$unit'")
+  done < <(yq -r '.services[] | . as $s | .config_paths[]? | $s.unit + "\t" + .' "$INVENTORY_FILE")
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    types+=(user_dir); owners+=(""); paths+=("$(_norm_overlap_path "$d")"); labels+=("user_dir")
+  done < <(yaml_list '.user_dirs[]')
+
+  local i j n="${#paths[@]}"
+  for (( i = 0; i < n; i++ )); do
+    for (( j = i + 1; j < n; j++ )); do
+      local pi="${paths[$i]}" pj="${paths[$j]}"
+      if [ "$pi" = "$pj" ]; then
+        warn "  duplicate configuration ownership: ${labels[$i]} and ${labels[$j]} both declare '$pi'"
+        errs=$((errs + 1))
+        continue
+      fi
+      local outer_i inner_i
+      if [[ "$pj" == "$pi"/* ]]; then
+        outer_i=$i; inner_i=$j
+      elif [[ "$pi" == "$pj"/* ]]; then
+        outer_i=$j; inner_i=$i
+      else
+        continue
+      fi
+      local outer_p="${paths[$outer_i]}" inner_p="${paths[$inner_i]}"
+      local rel first
+      rel="${inner_p#"$outer_p"/}"
+      first="${rel%%/*}"
+      local allowed=0 pat
+      if [ "${types[$outer_i]}" = "app" ]; then
+        local oname="${owners[$outer_i]}"
+        # shellcheck disable=SC2086  # word-split the space-joined exclude list
+        for pat in ${app_excludes["$oname"]:-}; do
+          # shellcheck disable=SC2254  # exclude patterns may be globs
+          [[ "$first" == $pat ]] && { allowed=1; break; }
+        done
+      fi
+      if [ "$allowed" = "0" ]; then
+        warn "  overlapping declarations: ${labels[$inner_i]} ('$inner_p') is nested under ${labels[$outer_i]} ('$outer_p'); declare it under one owner only, or add the nested component to the outer app's exclude list to allow the split"
+        errs=$((errs + 1))
+      fi
+    done
+  done
+  return "$(( errs > 0 ? 1 : 0 ))"
+}
+
 validate_inventory() {
   require_yq 0
   local errors=0
 
-  # Validate apps.
-  while IFS=$'\t' read -r name itype icmd check pkg; do
-    [ -n "$name" ] || continue
-    # Safe identifier: alphanumeric, dash, underscore, dot. No slashes, no spaces.
-    if ! [[ "$name" =~ ^[a-zA-Z0-9._-]+$ ]]; then
-      warn "  app '$name': name contains invalid characters (a-z, 0-9, ., _, - only)"
-      errors=$((errors + 1))
-      continue
-    fi
-    if [ -z "$itype" ]; then
-      warn "  app '$name': missing install_type"
-      errors=$((errors + 1))
-      continue
-    fi
-    case "$itype" in
-      apt|snap|snap-classic|flatpak|npm-global|pipx|cargo) ;;
-      script|custom)
-        if [ -z "$icmd" ]; then
-          warn "  app '$name': install_type '$itype' requires install_command"
-          errors=$((errors + 1))
-        fi
-        ;;
-      *) warn "  app '$name': unknown install_type '$itype'"
-         errors=$((errors + 1)) ;;
-    esac
-    # package override only meaningful for apt/snap/snap-classic/flatpak
-    if [ -n "$pkg" ]; then
-      case "$itype" in
-        apt|snap|snap-classic|flatpak) ;;
-        *) warn "  app '$name': 'package' field only applies to apt/snap/snap-classic/flatpak installs"
-           errors=$((errors + 1)) ;;
-      esac
-    fi
-    if { [ "$itype" = "script" ] || [ "$itype" = "custom" ]; } && [ -z "$check" ]; then
-      warn "  app '$name': script/custom installer has no check_cmd — re-runs will re-execute the installer"
-    fi
-    # Validate config_paths.
-    while IFS= read -r cp; do
-      [ -n "$cp" ] || continue
-      if ! validate_path_contained "$cp" "$HOME" 2>/dev/null && ! validate_path_contained "$cp" "/" 2>/dev/null; then
-        warn "  app '$name': invalid config_path '$cp'"
-        errors=$((errors + 1))
-      fi
-    done < <(app_get "$name" '.config_paths[]?')
-  done < <(yq -r '.apps[] | [.name, .install_type, (.install_command // ""), (.check_cmd // ""), (.package // "")] | @tsv' "$INVENTORY_FILE")
+  # 1) STRUCTURAL — versioned JSON Schema via a real validator.
+  if ! validate_schema_structure; then
+    err "  Inventory failed schema validation (inventory/schema.yaml) — fix inventory.yaml first."
+    errors=$((errors + 1))
+  fi
 
-  # Check for duplicate app names.
+  # 2) Platform support (strict: unsupported arch/release blocks).
+  if ! check_system_support; then
+    errors=$((errors + 1))
+  fi
+
+  # 3) Unique app names.
   local dupes
   dupes="$(yaml_list '.apps[] | .name' | sort | uniq -d)"
   if [ -n "$dupes" ]; then
@@ -235,22 +457,35 @@ validate_inventory() {
     errors=$((errors + 1))
   fi
 
-  # Validate services.
-  while IFS=$'\t' read -r unit target; do
-    [ -n "$unit" ] || continue
-    if ! [[ "$unit" =~ ^[a-zA-Z0-9@._:-]+\.(service|timer|socket|path)$ ]]; then
-      warn "  service '$unit': invalid systemd unit name (must end in .service/.timer/.socket/.path, no slashes/control chars)"
-      errors=$((errors + 1))
-      continue
-    fi
-    case "$target" in
-      user|system) ;;
-      *) warn "  service '$unit': target must be 'user' or 'system', got '$target'"
-         errors=$((errors + 1)) ;;
-    esac
-  done < <(yq -r '.services[] | [.unit, (.target // "system")] | @tsv' "$INVENTORY_FILE")
+  # 4) Unique service unit names.
+  dupes="$(yaml_list '.services[] | .unit' | sort | uniq -d)"
+  if [ -n "$dupes" ]; then
+    warn "  duplicate service unit names: $dupes"
+    errors=$((errors + 1))
+  fi
 
-  # Validate user_dirs.
+  # 5) default_shell must be provided by a declared package — either a declared
+  #    app name, a declared apt package, or the package name an apt-declared app
+  #    overrides with (e.g. app 'myfish' install_type apt package 'fish').
+  #    (here-strings, not pipes: pipefail + early-exit grep SIGPIPEs slow yq)
+  local shell_path shell_bin app_names pkg_names apt_pkgs
+  shell_path="$(yaml_get '.default_shell')"
+  if [ -n "$shell_path" ]; then
+    shell_bin="$(basename "$shell_path")"
+    app_names="$(yaml_list '.apps[] | .name')"
+    pkg_names="$(yaml_list '.apt_packages[]')"
+    apt_pkgs="$(yq -r '.apps[] | select(.install_type == "apt") | .package // ""' "$INVENTORY_FILE")"
+    if ! grep -Fqx "$shell_bin" <<< "$app_names" \
+       && ! grep -Fqx "$shell_bin" <<< "$pkg_names" \
+       && ! grep -Fqx "$shell_bin" <<< "$apt_pkgs"; then
+      warn "  default_shell '$shell_path': no declared app, apt package, or apt app package override provides '$shell_bin'"
+      errors=$((errors + 1))
+    fi
+  fi
+
+  # 6) user_dirs semantics: under $HOME, never $HOME itself (form + traversal
+  #    are already enforced by the schema).
+  local d
   while IFS= read -r d; do
     [ -n "$d" ] || continue
     if [ "$d" = "~" ]; then
@@ -264,14 +499,20 @@ validate_inventory() {
     fi
   done < <(yaml_list '.user_dirs[]')
 
-  # Validate dotfiles.
-  while IFS= read -r df; do
-    [ -n "$df" ] || continue
-    if [[ "$df" =~ ^/ ]] || [[ "$df" =~ \.\. ]]; then
-      warn "  dotfiles: '$df' must be a relative path under \$HOME"
-      errors=$((errors + 1))
-    fi
-  done < <(yaml_list '.dotfiles[]')
+  # 7) script/custom installers must not require interactive input.
+  if ! check_interactive_commands; then
+    errors=$((errors + 1))
+  fi
+
+  # 8) No config path nested under the same app's own excluded path.
+  if ! check_config_under_excluded; then
+    errors=$((errors + 1))
+  fi
+
+  # 9) No overlapping / duplicate path ownership across owners.
+  if ! check_config_overlaps; then
+    errors=$((errors + 1))
+  fi
 
   if [ "$errors" -gt 0 ]; then
     warn "Inventory validation found $errors issue(s). Please fix inventory.yaml before continuing."
@@ -319,14 +560,27 @@ release_lock() {
 }
 
 # --- Backup manifest -----------------------------------------------------
-# Write an in-progress marker (atomically replaces any old marker).
+# Write an in-progress marker. This ALWAYS goes into the STAGING manifest
+# ($STAGE/backup-info.txt), never into the live backups/backup-info.txt:
+# the live manifest is only ever replaced atomically by publish_backup with
+# a generation that passed final verification. Writing the marker into live
+# would (a) modify the last-known-good backup in place and (b) make any
+# rollback to the previous generation un-restorable (restore refuses
+# 'in_progress' manifests).
+# Falls back to $BACKUP_MANIFEST only if STAGE is not set (callers that have
+# no staging concept, e.g. restore.sh — never call this in that case).
 manifest_in_progress() {
-  local run_id="$1"
+  local run_id="$1" target=""
+  if [ -n "${STAGE:-}" ]; then
+    target="$STAGE/backup-info.txt"
+  else
+    target="$BACKUP_MANIFEST"
+  fi
   {
     echo "run_id: $run_id"
     echo "status: in_progress"
     echo "started: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  } > "$BACKUP_MANIFEST"
+  } > "$target"
 }
 
 # Write the final manifest with artifact tracking.
@@ -397,6 +651,139 @@ manifest_verify_restorable() {
   fi
 
   ok "Backup manifest verified: status=ok"
+  return 0
+}
+
+# --- Backup publication (transactional swap) -----------------------------
+# publish_backup: atomically publish the staged generation as the live
+# backups/. Guarantees:
+#   * STAGE and backups/ must be on the SAME filesystem — rename(2) across
+#     devices is not atomic and can fail; verified before anything is moved.
+#   * The live dir is renamed aside FIRST, and the script fails immediately
+#     if that rename fails — it never moves staging over an existing live dir.
+#   * The previous generation is kept until the new one passes a final
+#     manifest verification ('status: ok'); only then is it dropped.
+#   * If the new generation fails verification and a previous generation
+#     exists, we roll back to it (restore refuses non-ok manifests, so a
+#     degraded live backup would be unusable).
+#   * A cleanup trap removes leftovers from interrupted runs, and once the new
+#     generation is verified, any backups.old.* generations.
+#   * Crash consistency: after the swap the directory could be fsync'ed for
+#     stronger guarantees (optional — not done by default; see README FAQ).
+# Uses globals: STAGE, BACKUPS_DIR, BACKUP_MANIFEST, ARTIFACTS, REPO_ROOT.
+publish_backup() {
+  _PUBLISHED=0
+  _old_gen=""
+  _cleanup_publish() {
+    local rc="$1"
+    # Clear traps first: a signal handler that exits would otherwise re-fire
+    # the EXIT trap and run this cleanup twice.
+    trap - EXIT INT TERM
+    # Not yet published + a previous generation exists => the new generation
+    # was never verified (live absent, or present but not 'status: ok' because
+    # a signal landed between the swap and verification). Restore the
+    # last-known-good so it stays live.
+    if [ "$_PUBLISHED" != "1" ] && [ -d "$_old_gen" ]; then
+      if [ ! -d "$BACKUPS_DIR" ] || ! grep -q '^status: ok$' "$BACKUP_MANIFEST" 2>/dev/null; then
+        rm -rf "$BACKUPS_DIR" 2>/dev/null || true
+        if mv "$_old_gen" "$BACKUPS_DIR" 2>/dev/null; then
+          warn "Backup run interrupted before the new generation was verified — restored the previous backup generation."
+        fi
+      fi
+    fi
+    rm -f "$ARTIFACTS" 2>/dev/null || true
+    # STAGE only still exists when the run died before publishing.
+    rm -rf "$STAGE" 2>/dev/null || true
+    # Only drop previous generations once the new one was verified good.
+    if [ "$_PUBLISHED" = "1" ]; then
+      rm -rf "$REPO_ROOT"/backups.old.* 2>/dev/null || true
+    fi
+    exit "$rc"
+  }
+  trap '_cleanup_publish $?' EXIT INT TERM
+
+  # Nothing to publish?
+  [ -d "$STAGE" ] || die "Nothing to publish: staging directory not found at $STAGE."
+
+  # Same-filesystem check — both renames must stay within one device. Compare
+  # STAGE against the live dir's own device (it may be a mountpoint on another
+  # filesystem even though it lives under the repo root) and against the repo
+  # root as a fallback.
+  local stage_dev root_dev live_dev
+  stage_dev="$(stat -c %d "$STAGE" 2>/dev/null || true)"
+  root_dev="$(stat -c %d "$REPO_ROOT" 2>/dev/null || true)"
+  live_dev=""
+  [ -d "$BACKUPS_DIR" ] && live_dev="$(stat -c %d "$BACKUPS_DIR" 2>/dev/null || true)"
+  if [ -n "$stage_dev" ] && [ -n "$live_dev" ] && [ "$stage_dev" != "$live_dev" ]; then
+    die "backups.staging and backups/ are on different filesystems (the live dir is its own mountpoint) — the swap would not be atomic. Keep the repo on a single filesystem."
+  fi
+  if [ -n "$stage_dev" ] && [ -n "$root_dev" ] && [ "$stage_dev" != "$root_dev" ]; then
+    die "backups.staging and backups/ are on different filesystems — the swap would not be atomic. Keep the repo on a single filesystem."
+  fi
+
+  # Swap: live -> backups.old.<pid> (previous generation), staging -> live.
+  if [ -d "$BACKUPS_DIR" ]; then
+    # Stray generations from a crashed run are superseded by the live dir.
+    rm -rf "$REPO_ROOT"/backups.old.* 2>/dev/null || true
+    _old_gen="$REPO_ROOT/backups.old.$$"
+    if ! mv "$BACKUPS_DIR" "$_old_gen" 2>/dev/null; then
+      die "Could not move the existing backups/ aside (permissions or I/O error) — the previous backup was NOT modified."
+    fi
+  fi
+  if ! mv "$STAGE" "$BACKUPS_DIR" 2>/dev/null; then
+    if [ -d "$_old_gen" ]; then
+      if mv "$_old_gen" "$BACKUPS_DIR" 2>/dev/null; then
+        die "Failed to publish the new backup — the previous backup has been restored."
+      fi
+      die "CRITICAL: publishing the new backup failed AND rolling back failed. Manual recovery: the previous backup is at $_old_gen."
+    fi
+    die "Failed to publish the new backup (no previous generation existed)."
+  fi
+
+  # Final verification: keep (or restore) the previous generation unless the
+  # new one reports 'status: ok'. Three cases:
+  #   * manifest present + 'status: ok'   -> keep the new generation, drop old
+  #   * manifest present + degraded       -> restore the old generation if one
+  #     exists; otherwise keep the new one as-is (it is the only snapshot, and
+  #     restore.sh can use it with --force-incomplete), with a loud warning.
+  #   * manifest absent (or unreadable)   -> the new generation is unusable by
+  #     restore.sh (hard refusal, no override). Restore the old generation if
+  #     one exists; otherwise remove the broken live dir and fail hard.
+  if grep -q '^status: ok$' "$BACKUP_MANIFEST" 2>/dev/null; then
+    _PUBLISHED=1
+  elif [ -r "$BACKUP_MANIFEST" ]; then
+    warn "The new generation's manifest does not report 'status: ok' — restore would need --force-incomplete."
+    if [ -d "$_old_gen" ]; then
+      rm -rf "$BACKUPS_DIR" || die "Could not remove the unverified generation at $BACKUPS_DIR — previous backup preserved at $_old_gen."
+      if mv "$_old_gen" "$BACKUPS_DIR" 2>/dev/null; then
+        warn "Rolled back to the previous (verified) backup generation."
+      else
+        die "Could not roll back — the previous generation is preserved at $_old_gen."
+      fi
+    else
+      warn "No previous generation to roll back to — keeping the new generation as-is (review backup-info.txt)."
+      _PUBLISHED=1
+    fi
+  else
+    if [ -d "$_old_gen" ]; then
+      rm -rf "$BACKUPS_DIR" || die "Could not remove the unverified generation at $BACKUPS_DIR — previous backup preserved at $_old_gen."
+      if mv "$_old_gen" "$BACKUPS_DIR" 2>/dev/null; then
+        warn "The new generation has no manifest — rolled back to the previous (verified) backup generation."
+      else
+        die "Could not roll back — the previous generation is preserved at $_old_gen."
+      fi
+    else
+      rm -rf "$BACKUPS_DIR" || die "Could not remove the unusable new generation at $BACKUPS_DIR — no previous backup existed, so there is nothing to fall back to."
+      die "The new generation has no manifest and no previous backup exists — refusing to keep an unusable backups/ directory."
+    fi
+  fi
+  rm -f "$ARTIFACTS"
+  # Publication is complete — drop the previous generation now that the new one
+  # is verified, and clear the trap so it does not re-fire at script exit.
+  if [ "$_PUBLISHED" = "1" ]; then
+    rm -rf "$REPO_ROOT"/backups.old.* 2>/dev/null || true
+  fi
+  trap - EXIT INT TERM
   return 0
 }
 

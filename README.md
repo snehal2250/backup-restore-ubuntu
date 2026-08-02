@@ -25,10 +25,14 @@ copying of the OS itself.
 
 ## Quick start
 
-> **Prerequisite:** the scripts read the inventory with `yq`. `inventory.sh` and
-> `backup.sh` will offer to install it for you (`sudo snap install yq`); `restore.sh`
-> auto-installs it on a fresh system — including under `--dry-run` (a preview still needs
-> to parse the inventory; that's the one thing a dry-run actually executes).
+> **Prerequisites:** the scripts read the inventory with `yq`, and validate it against
+> a **versioned JSON Schema** (`inventory/schema.yaml`) with a real validator
+> (`lib/schema_check.py`, python3 + the `jsonschema` library + PyYAML).
+> - `inventory.sh` and `backup.sh` will offer to install `yq` and the validator
+>   (`sudo snap install yq` / `sudo apt-get install -y python3-jsonschema python3-yaml`);
+> - `restore.sh` auto-installs both on a fresh system — including under `--dry-run`
+>   (a preview still needs to read and validate the inventory; that's the only thing a
+>   dry-run actually executes).
 
 ```bash
 # 1. Declare what you use (your manual responsibility — this file is the source of truth)
@@ -86,9 +90,11 @@ Keep everything current day-to-day:
 
 ```
 inventory/inventory.yaml   the single source of truth (user-maintained)
+inventory/schema.yaml      versioned JSON Schema (draft 2020-12) the inventory is validated against
 lib/common.sh              shared helpers for all scripts
+lib/schema_check.py        real structural validator (python3 + jsonschema + PyYAML)
 lib/catalog.sh             built-in knowledge of common apps (opencode, code, docker, ...)
-inventory.sh               the manual inventory tool
+inventory.sh               the manual inventory tool (list / add-* / remove-* / validate / review / wizard)
 backup.sh                  capture configuration -> backups/
 restore.sh                 fresh install + config overwrite
 update_all_ubuntu.sh       update everything
@@ -119,6 +125,24 @@ app's captured folder before re-capturing, so `backups/` reflects the **current*
 only (a config file that no longer exists on disk is dropped from the live `backups/`).
 History lives in the timestamped mirror snapshots in `BACKUP_DEST`, which are immutable
 once created.
+
+**What if some paths were missing during backup?** The run still **completes** and the
+file is written, but the manifest reports `status: degraded` instead of `status: ok`
+(per-artifact lines show which were `missing`/`incomplete`). `restore.sh` refuses degraded
+snapshots unless you pass `--force-incomplete`. `degraded` is NOT the same as an
+interrupted run — interrupted runs never publish a live manifest at all.
+
+**How atomic is the `backups/` swap?** Publication is a two-step rename that is atomic
+only when `backups.staging/` and `backups/` share a filesystem — `backup.sh` verifies
+that (same device, including the live dir itself if it is a mountpoint) before moving
+anything. The live folder is renamed aside **first** and the run fails immediately if
+that fails: it never moves staging over an existing live folder. The previous generation
+is kept until the new one passes a final manifest check (`status: ok`); if the new
+generation is degraded, `backup.sh` rolls back to the previous one (restore refuses
+non-ok manifests, so a degraded live backup would be unusable). A cleanup trap removes
+leftovers from crashed runs and restores the previous generation if a signal interrupts
+the run before verification completes. If you need stronger crash consistency, fsync'ing
+the directory after the swap is an optional extra — it is not done by default.
 
 **Does restore delete config files I removed?** No. Restore is an **additive overlay** —
 it copies the captured config onto the fresh install and never deletes existing target
@@ -166,14 +190,18 @@ tail -5 "$newest/backup-info.txt"
 | `status: ok` + `mirror: ok` | Run completed **and** off-machine copy is in place | nothing |
 | `status: ok` + `mirror: failed` | Config captured, but the off-machine copy **failed** | fix `BACKUP_DEST` (disk mounted? writable?) and re-run `./backup.sh` |
 | `status: ok` + `mirror: disabled` | Run completed; no off-machine copy (`BACKUP_DEST` unset) | nothing — expected if mirror is intentionally off |
-| no `status: ok` line | **File missing or run didn't complete** (file is only written on completion) | check the run output/log for the error and re-run |
+| `status: degraded` | Run **completed** but some declared paths were missing/incomplete; the file exists | review `backup-info.txt` for which artifacts degraded; fix the cause (permissions? removed config?) and re-run — restore needs `--force-incomplete` otherwise |
+| no `backup-info.txt` / no `status` line | **No completed, verified run exists** (a completed run always writes the file atomically) | check the run output/log for the error and re-run |
 
-> **Local vs. snapshot marker:** `backups/backup-info.txt` is only written when a run
-> completes — a missing file means no completed run exists locally (the most recent
-> mirror snapshot still holds the previous successful run's marker). So if a run
-> aborted, the local file is absent while the newest snapshot carries the older run's
-> marker. Check the **local** file for the latest run's truth; use a snapshot whose
-> marker you verified locally first.
+> **Local vs. snapshot marker:** `backups/backup-info.txt` reflects the last **completed,
+> verified** publication. `backup.sh` never touches it mid-run — the `in_progress` marker
+> is written to the staging manifest (`backups.staging/backup-info.txt`) instead — and it
+> is replaced atomically only when a run finishes successfully. So a run that aborts
+> during capture leaves the previous `status: ok` marker (and backup) in place; a missing
+> local file means no completed run exists (or the run died exactly inside the atomic
+> swap). The newest mirror snapshot only receives the marker on a successful run — check
+> the **local** file for the latest run's truth, then verify the snapshot you restore
+> from carries a matching marker.
 
 **Is `backups/` committed?** No — it's git-ignored (config can contain secrets).
 `backup.sh` automatically mirrors the whole folder (no filtering) to the local disk at

@@ -74,7 +74,13 @@ your settings over it.
    a staging directory, validates it, writes a manifest, mirrors it, and atomically swaps
    it in. The last-known-good backup is **never** modified in place. A failure to complete
    simply leaves the staging directory (cleaned up on next run) and the previous backup
-   intact. `flock` prevents concurrent runs.
+   intact. `flock` prevents concurrent runs. Publication (`publish_backup` in
+   `lib/common.sh`) is fail-fast: the live dir is renamed aside **first** and any failure
+   stops the run — it never moves staging over an existing live dir. The two renames are
+   atomic only on one filesystem, which is verified before anything moves. The previous
+   generation is retained until the new one passes final manifest verification
+   (`status: ok`); a failing generation rolls back to the last-known-good one. A cleanup
+   trap removes leftovers from interrupted runs.
 9. **Truthful reporting.** `restore.sh` tracks every failure via an accumulated exit code
    bitmask. If any required app install, config restore, or service fails, the script exits
    nonzero. The backup manifest records per-artifact status (`captured`/`missing`/
@@ -110,10 +116,14 @@ docs/REHEARSAL-VIRTUALBOX.md <- tested VirtualBox rehearsal procedure (Oracle 7.
                               VM creation, vboxsf shared folders, restore replay)
 inventory/
   inventory.yaml          <- THE source of truth (user-maintained, git-tracked)
+  schema.yaml             <- VERSIONED JSON Schema (draft 2020-12) — the structural
+                             contract for inventory.yaml (schema_version must match)
 lib/
   common.sh               <- shared helpers (logging, yq bootstrap, YAML getters, status
                              checkers, path safety, manifest helpers, inventory validation,
                              concurrency protection, architecture detection)
+  schema_check.py         <- REAL structural validator: python3 + jsonschema + PyYAML,
+                             checks inventory.yaml against inventory/schema.yaml
   catalog.sh              <- seed catalog of common apps (opencode, code, docker, chrome,
                              gh, gcloud, go, uv, tmux, terraform, ollama, az, azurite,
                              slack, onlyoffice, storage-explorer, cloudflared, ...)
@@ -134,10 +144,17 @@ backups/                  <- output of backup.sh (GIT-IGNORED; contains personal
 
 ## 5. Inventory model (`inventory/inventory.yaml`)
 
-The file is plain YAML with top-level scalars (`default_shell`), flat lists (`groups`,
-`user_dirs`), and structured lists (`apps`, `services`).
+The file is plain YAML with top-level scalars (`schema_version`, `profile`,
+`default_shell`), flat lists (`groups`, `user_dirs`), and structured lists (`apps`,
+`services`). `schema_version` and `profile` are REQUIRED, and ALL top-level lists
+(`apt_packages`, `snap_packages`, `flatpak_apps`, `dotfiles`, `groups`, `user_dirs`,
+`apps`, `services`) are required too (empty allowed) — the scripts read them with plain
+`yq` expressions, so a schema-valid inventory must declare every one. All are validated
+against `inventory/schema.yaml` (bump both together when the contract changes).
 
 ```yaml
+schema_version: 1            # REQUIRED — must match inventory/schema.yaml
+profile: workstation         # REQUIRED — machine profile (validated)
 default_shell: /usr/bin/fish   # optional: login shell set via chsh after restore
 groups:                        # optional: Unix groups the user needs
   - docker
@@ -188,9 +205,26 @@ Rules for agents editing the inventory:
 - Optional `package` overrides the package name for `apt`/`snap`/`snap-classic`/`flatpak`
   installs when it differs from the app name. It must ONLY be used with those install types.
 - `config_paths` and `user_dirs` use `~` (tilde) form for portability.
-- `validate_inventory` runs before all destructive operations. It checks unique app names,
-  valid install types, required fields, safe identifiers (no slashes/..), valid service
-  unit names, and path containment.
+- `validate_inventory` runs before all destructive operations. It has TWO layers:
+  1. **Structural** — `inventory/schema.yaml` (versioned JSON Schema, draft 2020-12)
+     enforced by a REAL validator (`lib/schema_check.py`: python3 + the reference
+     `jsonschema` library + PyYAML). This replaces all ad-hoc structural parsing: allowed
+     keys per install type, package/source identifier patterns, path forms (~/ or
+     absolute, no `..`, no control chars), systemd unit names, group names,
+     `schema_version`/`profile` identity.
+  2. **Semantic** — checks a schema cannot express: unique app/service names,
+     `default_shell` provided by a declared app, apt package, or apt app `package`
+     override, user_dirs under `$HOME`,
+     interactive install commands (known TUI binaries — `read`/`select`/`dialog`/`fzf`/
+     `ssh`/etc. — and `apt`/`flatpak` without `-y`; heuristic, not exhaustive),
+     config paths nested under the same app's own `exclude` patterns, and overlapping
+     or duplicated path ownership across apps/services/user_dirs (a nested path is only
+     allowed when the outer app's `exclude` covers the nested component — the freebuff
+     `~/.config/manicode` + `user_dirs: ~/.config/manicode/projects` split is the
+     canonical allowed case). It also hard-blocks unsupported architectures/Ubuntu
+     releases (`SUPPORTED_ARCHS`, `SUPPORTED_UBUNTU_RELEASES` in `lib/common.sh`).
+- `schema_version`/`profile` are top-level REQUIRED keys validated by the schema;
+  never bump them without updating `inventory/schema.yaml` (`$id` + version) and docs.
 - `extensions` lists extension/model IDs (without versions). During the post-install phase
   of restore, each is installed via the app's native mechanism.
 - `default_shell` is a top-level key (not per-app). The declared shell package must itself
@@ -220,8 +254,11 @@ Rules for agents editing the inventory:
 ```
 Output goes to `backups/` (git-ignored) via transactional staging, then mirrored to
 `BACKUP_DEST`. The backup manifest (`backup-info.txt`) records per-artifact status and
-overall outcome. A `status: ok` line means ALL declared artifacts were captured. A
-missing or `in_progress` status means the run did not complete.
+overall outcome. A `status: ok` line means ALL declared artifacts were captured. The
+`in_progress` marker is written into the STAGING manifest (`backups.staging/backup-info.txt`)
+when a run starts — never into the live `backups/` manifest, which is only ever replaced
+atomically by a generation that passed final verification. A missing live manifest, or
+one that does not report `status: ok`, means the last completed run did not succeed.
 
 **Restore** (on a fresh Ubuntu install):
 ```bash
@@ -261,7 +298,10 @@ nonzero if any required item failed.
 - **Reuse `lib/common.sh`**: logging (`info/ok/warn/err/die`), `confirm`, `require_cmd`,
   `require_yq`, `require_non_root`, `require_ubuntu`, `yaml_get`, `yaml_list`,
   `app_get`, `expand_path`, `normalize_path`, `validate_path_contained`,
-  `validate_inventory`, `manifest_in_progress`, `manifest_final`, `manifest_verify_restorable`,
+  `require_schema_validator`, `validate_schema_structure`, `validate_inventory`,
+  `manifest_in_progress`, `manifest_final`, `manifest_verify_restorable`,
+  `publish_backup` (transactional swap: same-filesystem check, fail-fast renames,
+  rollback to the previous generation, cleanup trap),
   `run` (dry-run aware), status checkers (`is_apt_installed`, `is_snap_installed`,
   `is_flatpak_installed`, `is_app_installed_by_source`, `is_app_installed`),
   `with_lock`/`release_lock` (flock).
@@ -269,6 +309,13 @@ nonzero if any required item failed.
   `YQ_AUTO`. `app_get` uses `strenv(N)` for the app name (safe) and `$2` directly for the
   yq query (always a fixed expression like `.install_type`). Write YAML with `yq -i` and
   `strenv(VAR)`/`load()` — never by string-concatenating user input into expressions.
+- **Structural checks are NEVER ad-hoc bash parsing** — they go through the versioned
+  schema (`inventory/schema.yaml`) and the real validator (`require_schema_validator` /
+  `validate_schema_structure`, python3 + jsonschema). `SCHEMA_AUTO` mirrors `YQ_AUTO`
+  (0=die, 1=auto-install python3-jsonschema python3-yaml, 2=confirm); scripts set it the
+  same way they set `YQ_AUTO`. Free-text values (install_command, config paths) must
+  never be emitted through yq `@tsv` (it quotes double-quote fields) — use plain `-r`
+  streams or tab-joined concatenation (control chars are schema-forbidden).
 - **Never run `restore.sh` or `update_all_ubuntu.sh` on the user's machine without
   explicit permission.** `inventory.sh` only edits the inventory; `backup.sh` only writes
   to git-ignored `backups/`. Both are safe. `restore.sh` modifies the system.
@@ -287,6 +334,7 @@ nonzero if any required item failed.
 - **Custom service** — a systemd unit the user installed themselves; only these are ever
   declared in the inventory.
 - **Manifest** — `backup-info.txt` written by `backup.sh` on completion with artifact
-  status, inventory SHA-256, and overall `status: ok`/`in_progress` marker.
+  status, inventory SHA-256, and overall `status: ok` (or `degraded`). The `in_progress`
+  marker lives only in the staging manifest during a run.
 - **Transactional backup** — build in staging, validate, mirror, atomically swap to live.
   The current `backups/` is never the target of an in-progress rebuild.

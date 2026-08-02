@@ -13,6 +13,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 source "$LIB_DIR/catalog.sh"
 
 YQ_AUTO=2
+SCHEMA_AUTO=2   # ask before installing the schema validator (python3-jsonschema)
 
 [ -f "$INVENTORY_FILE" ] || die "Inventory file not found: $INVENTORY_FILE"
 
@@ -41,9 +42,12 @@ esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 # --- validate ------------------------------------------------------------
 cmd_validate() {
   if validate_inventory; then
-    ok "Inventory is valid."
+    local sv prof
+    sv="$(yaml_get '.schema_version')"
+    prof="$(yaml_get '.profile')"
+    ok "Inventory is valid (schema_version=${sv:-?}, profile=${prof:-?})."
   else
-    die "Inventory has issues — see warnings above."
+    die "Inventory has issues — see messages above."
   fi
 }
 

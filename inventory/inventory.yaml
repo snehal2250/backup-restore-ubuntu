@@ -7,7 +7,15 @@
 # here as separate entries. No versions anywhere: restore always installs the
 # latest stable from the recommended source.
 #
+# VALIDATION: this file is checked against the VERSIONED JSON Schema in
+# inventory/schema.yaml (structural, via lib/schema_check.py — a real
+# validator) plus semantic checks in lib/common.sh validate_inventory()
+# (unique names, path ownership overlaps, default_shell provenance, ...).
+# Run: ./inventory.sh validate. `schema_version` MUST equal the version the
+# schema file implements; bump both together when the contract changes.
+#
 # Editing rules (see AGENTS.md for the full context):
+#   * schema_version / profile -> fixed identity of the file (validated).
 #   * apt_packages / snap_packages / flatpak_apps / dotfiles / user_dirs -> one item per line
 #   * user_dirs: whole folders the user wants captured (e.g. ~/Documents), '~' form.
 #     Unlike app config_paths these are user DATA, not app config — backed up whole.
@@ -27,6 +35,9 @@
 #                  (e.g. /usr/bin/fish). The shell package must be declared as an app.
 #   * services:  only CUSTOM services the user installed; target system|user
 # =============================================================================
+
+schema_version: 1          # must match inventory/schema.yaml (bump both together)
+profile: workstation       # machine profile, validated against the schema
 
 default_shell: /usr/bin/fish
 apt_packages: []
