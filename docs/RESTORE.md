@@ -15,16 +15,17 @@ file when you are actually restoring a machine.
 
 ## 0. Understand the flow first
 
-`restore.sh` runs in five phases. Nothing happens in a phase unless the inventory declares
+`restore.sh` runs in six phases. Nothing happens in a phase unless the inventory declares
 items for it, and the whole thing is **idempotent** — you can re-run it safely.
 
 | Phase | What it does | Requires inventory |
 | --- | --- | --- |
-| 1/5 Base system | `apt-get update`; full-upgrade **only if** `--upgrade-base` (opt-in) | — |
-| 2/5 Packages | installs `apt_packages`, `snap_packages` (incl. `:classic`), `flatpak_apps` | the package lists |
-| 3/5 Apps | per app: installs `depends_apt`, then the app itself, then restores its config | `apps:` |
-| 4/5 Services | copies unit files, restores their config, then enables/starts them | `services:` |
-| 5/5 Dotfiles & user dirs | copies declared dotfiles to `$HOME`; restores whole `user_dirs` folders (e.g. `~/Documents`) | `dotfiles:` + `user_dirs:` |
+| 1/6 Base system | `apt-get update`; full-upgrade **only if** `--upgrade-base` (opt-in) | — |
+| 2/6 Packages | installs `apt_packages`, `snap_packages` (incl. `:classic`), `flatpak_apps` | the package lists |
+| 3/6 Apps | per app: installs `depends_apt`, then the app itself, then restores its config | `apps:` |
+| 4/6 Services | copies unit files, restores their config, then enables/starts them | `services:` |
+| 5/6 Dotfiles & user dirs | copies declared dotfiles to `$HOME`; restores whole `user_dirs` folders (e.g. `~/Documents`) | `dotfiles:` + `user_dirs:` |
+| 6/6 Post-install | adds `groups` (`usermod -aG`), sets `default_shell` (`chsh`), installs app `extensions`/models | `groups:`, `default_shell`, `extensions` |
 
 Flags:
 
@@ -39,7 +40,24 @@ Flags:
 ./restore.sh --upgrade-base  # OPT-IN: also apt full-upgrade the base OS + autoremove
 ./restore.sh --configs-only  # restore config only (skip all installs)
 ./restore.sh --packages-only # install fresh only (skip config restore)
+./restore.sh --plan          # preview the plan: which phases/apps will run (dry-run)
+./restore.sh --from-phase services
+#                            # resume a failed restore: skip everything before this
+#                            # phase (base|packages|apps|services|dotfiles|postinstall)
+./restore.sh --only code,git # only these apps (plus any listed phases) run
+./restore.sh --skip user-data
+#                            # skip this phase (user-data == the dotfiles phase) and/or
+#                            # these apps; --skip user-data == --skip dotfiles
+./restore.sh --non-interactive
+#                            # never prompt (implies --yes); for scripts/automation
 ```
+
+Every phase boundary is recorded in the restore journal
+(`~/.local/state/backup-restore-ubuntu/rollback-<timestamp>/restore-journal.log`) as
+`phase-start`/`phase-done` lines, so an interrupted run leaves a durable record of where
+it got to. `--only`/`--skip` accept **phase names AND app names** — phase names gate
+whole phases, app names filter the apps phase (so `--only code,git` restores just those
+apps while every phase still runs). Unknown names are rejected with an error.
 
 ---
 
@@ -182,7 +200,7 @@ Read the output carefully. For every app you should see one of:
   `[dry-run] curl -fsSL -o /tmp/... .deb` + `[dry-run] sudo apt-get install -y /tmp/...deb`
   (a `deb`), or `[dry-run] bash /tmp/<app>.install.sh` (a `script`).
 
-Also verify `Phase 4/5: services` lists your custom services and that their unit files
+Also verify `Phase 4/6: services` lists your custom services and that their unit files
 exist in `backups/services/<unit>/unit` (a missing unit file is warned as
 "no unit file in backups/ — skipping").
 
@@ -225,37 +243,45 @@ network is stable:
 
 ### What happens, phase by phase (what to watch)
 
-**Phase 1/5 — base system.** `apt-get update` runs (needed before any apt installs).
+**Phase 1/6 — base system.** `apt-get update` runs (needed before any apt installs).
 Without `--upgrade-base` nothing else happens here by design.
 
-**Phase 2/5 — packages.** apt packages install in one batch. Snap packages install one by
+**Phase 2/6 — packages.** apt packages install in one batch. Snap packages install one by
 one (classic entries get `--classic`). If `flatpak_apps` is non-empty and flatpak is
 missing, it is installed and Flathub is added automatically.
 
-**Phase 3/5 — apps.** For each app: dependencies (`depends_apt`) install first, then the
+**Phase 3/6 — apps.** For each app: dependencies (`depends_apt`) install first, then the
 app via its typed `installer:` record (`apt`/`snap`/`snap_classic`/`flatpak`/
 `npm_global`/`pipx`/`cargo`/`apt_repository`/`deb`/`tarball`/`script` — implemented in
 `lib/installers.sh`). After install, the app's `config_paths` are rsynced back from
-`backups/apps/<name>/` — both `$HOME` parts and `/` (root) parts if present.
+`backups/apps/<name>/` — both `$HOME` parts and `/` (root) parts if present. With
+`--only <apps>` only the listed apps run here; `--skip <apps>` skips the listed ones.
 
-**Phase 4/5 — services.** Each declared service's unit file is copied to
+**Phase 4/6 — services.** Each declared service's unit file is copied to
 `/etc/systemd/system/` (system) or `~/.config/systemd/user/` (user), `daemon-reload` runs,
 then its `config_paths` (env file, config dir, ...) are restored, and **then**
 `enable`/`start` per the declaration — so the service boots with its real configuration
 on first start.
 
-**Phase 5/5 — dotfiles & user dirs.** Each declared dotfile is copied from
+**Phase 5/6 — dotfiles & user dirs.** Each declared dotfile is copied from
 `backups/dotfiles/` to `$HOME`. Whole user-data folders declared in `user_dirs`
 (e.g. `~/Documents`) are restored wholesale from `backups/user-dirs/` back to `$HOME`.
 Declare them with `./inventory.sh add-user-dir ~/Documents`; `backup.sh` captures them
 in full (they are user data, not app config).
 
+**Phase 6/6 — post-install.** Declared `groups` are added via `usermod -aG`, the
+`default_shell` is set via `chsh` (if declared and provided by a declared app), and each
+declared app's `extensions` (VS Code extensions, Azure CLI extensions, Ollama models) are
+installed through the app's native mechanism.
+
 **Config restore honours conflict policies, with a rollback bundle + journal.** Each
 app/service may declare `conflict_policy` (default `merge`): `merge` = additive overlay,
 never deletes (a config file that no longer exists in the backup is not removed —
 deliberate: restore must never delete data); `replace` = preserve existing into the
-rollback bundle, then mirror the backup exactly (`rsync --delete`); `skip-existing` =
-restore only missing files; `prompt` = ask per config path (non-interactive runs skip).
+rollback bundle, remove **only the exact leaf files** the backup would restore, then
+merge-restore (never `rsync --delete` against `$HOME` or `/` — that would wipe unrelated
+data); `skip-existing` = restore only missing files; `prompt` = ask per config path
+(non-interactive runs skip).
 Before any overwrite, restore captures what exists into a timestamped rollback bundle at
 `~/.local/state/backup-restore-ubuntu/rollback-<timestamp>/` (OUTSIDE the backup source)
 and appends one line per operation to its `restore-journal.log`

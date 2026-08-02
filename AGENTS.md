@@ -138,6 +138,15 @@ restore.sh                <- fresh install + config overwrite (--dry-run/--yes/-
                              --configs-only/--packages-only/--force-incomplete/--source <snapshot>)
 update_all_ubuntu.sh      <- updates apt/snap/flatpak/npm + inventory apps
 schedule_cron.sh          <- installs a systemd user timer (daily + after boot)
+tests/
+  run.sh                  <- automated test suite runner (./tests/run.sh; plain bash,
+                             no extra dependencies; exits non-zero on any failure)
+  helpers.sh              <- assertions (assert_ok/eq/contains/...) + sandbox helper
+  test_*.sh               <- unit + regression + static tests: integrity checksums,
+                             rollback/journal/conflict_policy, manifest helpers, path
+                             safety, interrupted-backup regression (staging-only marker
+                             + publish_backup success/rollback/fail-fast), and guards
+                             (bash -n, schema validation, no rsync --delete)
 backups/                  <- output of backup.sh (GIT-IGNORED; contains personal config)                             (apps/<name>/, services/<unit>/, dotfiles/, user-dirs/<name>/,
                               SHA256SUMS content checksums)
                              mirrored to BACKUP_DEST (default /media/vikram-athare/Storage/backup-restore-ubuntu)
@@ -301,13 +310,23 @@ one that does not report `status: ok`, means the last completed run did not succ
 ./restore.sh --configs-only         # restore config only (skip all installs)
 ./restore.sh --packages-only        # install fresh only (skip config + services)
 ./restore.sh --force-incomplete     # restore even from an incomplete backup
+./restore.sh --plan                 # preview which phases/apps will run (dry-run)
+./restore.sh --from-phase services  # resume: skip everything before this phase
+./restore.sh --only code,git        # only these apps (and any listed phases) run
+./restore.sh --skip user-data       # skip a phase (user-data == dotfiles) and/or apps
+./restore.sh --non-interactive      # never prompt (implies --yes)
 ```
-Restore validates the backup manifest (requires `status: ok`) and the SHA256SUMS content
-check before restoring config. Config is applied per the owner's `conflict_policy`
-(default `merge`), and every overwrite is first captured into a timestamped rollback
-bundle + restore journal (printed at the end of the run). Under `--packages-only`,
-services are installed but NOT enabled/started. Restore exits
-nonzero if any required item failed.
+Restore runs in six phases (base, packages, apps, services, dotfiles, postinstall), each
+gated by `phase_enabled`/`app_selected`/`phase_canonical` in `lib/common.sh` (pure
+functions, unit-tested in `tests/test_phases.sh`). `--only`/`--skip` accept phase names
+AND app names: phase names gate whole phases, app names filter the apps phase; unknown
+names die. Restore validates the backup manifest (requires `status: ok`) and the
+SHA256SUMS content check before restoring config. Config is applied per the owner's
+`conflict_policy` (default `merge`), and every overwrite is first captured into a
+timestamped rollback bundle + restore journal (printed at the end of the run). The
+journal is created up front on real runs and records `phase-start`/`phase-done` markers
+(the durable phase journal). Under `--packages-only`, services are installed but NOT
+enabled/started. Restore exits nonzero if any required item failed.
 
 **Post-restore** — groups, default shell, app extensions/models are applied:
 ```bash
@@ -332,7 +351,8 @@ nonzero if any required item failed.
 
 - **Shell code**: bash, `set -euo pipefail` at the top of every script, `shellcheck`
   clean. Scripts run on Ubuntu's default bash (4.x) — no bash 5-only features.
-- **Reuse `lib/common.sh`**: logging (`info/ok/warn/err/die`), `confirm`, `require_cmd`,
+- **Reuse `lib/common.sh`**: restore phase gating (`phase_enabled`, `app_selected`,
+  `phase_canonical`, `PHASE_ORDER`), logging (`info/ok/warn/err/die`), `confirm`, `require_cmd`,
   `require_yq`, `require_non_root`, `require_ubuntu`, `yaml_get`, `yaml_list`,
   `app_get`, `installer_get`/`installer_list`/`installer_has`, `expand_path`,
   `normalize_path`, `validate_path_contained`, `require_schema_validator`,
@@ -369,7 +389,16 @@ nonzero if any required item failed.
   (this file), `README.md`, and `docs/PLAN.md` if the schema, principles, or workflow
   change. If you change an exported helper in `lib/common.sh`, update all callers.
 - **Validate before finishing**: `bash -n <script>` on every script, `shellcheck
-  <script>` if installed. Also run `./inventory.sh validate` to check the inventory.
+  <script>` if installed. Also run `./inventory.sh validate` to check the inventory
+  and `./tests/run.sh` to run the automated suite (unit tests + interrupted-backup
+  regression + static checks).
+- **Test new behavior**: new helpers and fixed bugs get regression coverage in
+  `tests/test_*.sh` (run with `./tests/run.sh`). Tests are plain bash using the
+  assertions in `tests/helpers.sh`; sandboxes are created under `$REPO_ROOT`
+  (`.test-tmp.*`, git-ignored) because the snap-packaged yq cannot read /tmp.
+  Never touch the real `backups/`, `~/.local/state/backup-restore-ubuntu`, or the
+  system from a test — override the sandboxable globals (`HOME`, `STAGE`,
+  `BACKUPS_DIR`, `BACKUP_MANIFEST`, `REPO_ROOT`) instead.
 
 ## 8. Glossary
 

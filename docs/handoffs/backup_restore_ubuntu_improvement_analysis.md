@@ -1,21 +1,23 @@
 # Backup Restore Ubuntu — Improvement Analysis
 
 > **How to read this document (2026-08-02):** the analysis *body* below describes the
-> repo **at analysis time** (commit `5d12f028`). Every finding now carries a **status
-> badge** and the summary table at the top of "Prioritized findings" reflects the
-> **current** repo (HEAD `9002629` + uncommitted `--source` work). Where the body's
-> "Retrieved facts" / "Executive assessment" disagree with a ✅ completed badge, the
-> badge is authoritative — the facts describe the pre-fix code as it was when this
-> analysis was written.
+> repo **at analysis time** (commit `5d12f028`). Every finding carries a **status
+> badge**, the **progress table** at the top of "Prioritized findings" tracks what is
+> done vs. remaining, and the open items carry **"Resume here"** notes with the exact
+> next step and where in the code to pick it up. The progress table reflects the
+> **current** repo (HEAD `3659fd8` + uncommitted test suite and resumable-phase work).
+> Where the body's "Retrieved facts" / "Executive assessment" disagree with a ✅
+> completed badge, the badge is authoritative — the facts describe the pre-fix code as
+> it was when this analysis was written.
 
 ## Repository state
 
 - Repository: `backup-restore-ubuntu`
 - Branch: `main`
-- Commit at analysis time: `5d12f028c56af9b2df3301933021ce2492e58103` (current HEAD: `9002629`)
-- Working tree: **dirty** (uncommitted `--source` feature + this status update, 2026-08-02)
-- Untracked items observed: `backups.artifacts`, `backups.staging/`
-- **Status labels last updated: 2026-08-02** — every finding below carries its own status badge, and the summary table at the top of the findings lists them all.
+- Commit at analysis time: `5d12f028c56af9b2df3301933021ce2492e58103` (current HEAD: `3659fd8`)
+- Working tree: **dirty** — uncommitted as of 2026-08-02: the automated test suite (`tests/`, 7 files), the resumable-phase flags + durable phase journal (`restore.sh`, `lib/common.sh`), and doc updates (README, RESTORE.md, AGENTS.md, PLAN.md, this file)
+- Untracked items observed at analysis time: `backups.artifacts`, `backups.staging/` (git-ignored runtime artifacts of backup.sh; cleaned on the next run)
+- **Progress tracking last updated: 2026-08-02** — see the progress table + progress log at the top of "Prioritized findings" and the per-item "Resume here" notes below.
 - Investigation scope: backup transactionality, inventory design, package reinstall strategy, configuration and service restoration, safety, portability, validation, testing, and documentation.
 - Backup payloads and potentially sensitive configuration contents were intentionally not inspected.
 
@@ -27,25 +29,34 @@ The highest-priority issue is that the current backup flow can overwrite the pre
 
 ## Prioritized findings
 
-**Status summary (updated 2026-08-02)** — legend: ✅ completed · 🚧 in-progress (partial) · ⬜ pending · ⛔ not-required (overengineering)
+**Progress tracking (updated 2026-08-02)** — legend: ✅ completed · 🚧 in-progress (partial) · ⬜ pending · 🔓 unblocked (waiting on a dependency that has since landed) · ⛔ not-required (overengineering). "Resume" = the concrete next step for picking the item up again.
 
-| Item | Status |
-| --- | --- |
-| P0 — Preserve the previous known-good manifest | ✅ completed |
-| P0 — Make publication genuinely atomic and fail closed | ✅ completed |
-| P0 — External backup selection as a first-class restore input (`--source`) | ✅ completed |
-| P1 — Replace arbitrary install commands with structured installers | ✅ completed |
-| P1 — Add a strict inventory schema and semantic validation | ✅ completed |
-| P1 — Separate configuration, state, data, cache, and secrets | 🚧 in-progress |
-| P1 — Define restore conflict policies | ✅ completed |
-| P1 — Introduce explicit restore phases and resumability | 🚧 in-progress |
-| P1 — Improve backup completeness semantics | 🚧 in-progress |
-| P1 — Add integrity verification for backup contents | ✅ completed |
-| P2 — Improve portability across Ubuntu releases and architectures | 🚧 in-progress |
-| P2 — Avoid backing up application authentication blindly | ⬜ pending |
-| P2 — Reduce catalog/inventory drift | ⬜ pending |
-| P2 — Testing strategy | 🚧 in-progress |
-| Suggested target layout | ⛔ not-required |
+| Item | Status | Progress (what is done) | Remaining → resume here |
+| --- | --- | --- | --- |
+| P0 — Preserve the previous known-good manifest | ✅ | `manifest_in_progress` writes only to the staging manifest; the live `backups/backup-info.txt` is replaced only atomically by a verified `publish_backup`; restore refuses `in_progress` | — |
+| P0 — Make publication atomic and fail closed | ✅ | same-filesystem check, fail-fast first rename, deterministic rollback, previous generation kept until final `status: ok` verification, cleanup trap | — (directory `fsync` documented-but-optional, README FAQ) |
+| P0 — External backup selection (`--source`) | ✅ | full preflight: `realpath` resolution, verified manifest + artifact list, arch (fail) / Ubuntu (warn) / inventory-SHA (warn), writable-source warning, nothing copied/mounted implicitly | — |
+| P1 — Structured installers | ✅ | schema v2 typed `installer:` records (11 types) dispatched by `lib/installers.sh`; no free-form `install_command` anywhere | — |
+| P1 — Strict inventory schema + semantic validation | ✅ | `inventory/schema.yaml` v3 + real validator (`lib/schema_check.py`) + semantic checks (unique names, path overlap, `{version}` templates, platform gate) | — |
+| P1 — Separate config/state/data/cache/secrets | 🚧 | `config_paths` vs `user_dirs` split + per-app `exclude:` lists cover config / user-data / cache in practice | **Per-path `class:` model + pre-backup secret scanner.** Resume: `inventory/schema.yaml` (class enum), `backup.sh` capture loop, `lib/common.sh` validation, tests |
+| P1 — Restore conflict policies | ✅ | schema v3 `conflict_policy` (merge/replace/skip-existing/prompt), rollback bundle + restore journal, dry-run creates nothing | — (three-way merge: not-required) |
+| P1 — Explicit phases + resumability | ✅ | `--plan` / `--from-phase` / `--only` / `--skip` / `--non-interactive`; durable phase journal (`phase-start`/`phase-done`); gating unit-tested | — |
+| P1 — Backup completeness semantics | 🚧 | per-artifact `captured/missing/incomplete/empty`, overall `ok/degraded`, `status: ok` gate + `--force-incomplete` | **Per-item `required:` / `on_missing:` + `ok_with_warnings`/`failed` granularity.** Resume: `record_artifact` (backup.sh), `manifest_final`/`manifest_verify_restorable` (lib/common.sh), restore gating, schema v4, tests |
+| P1 — Content integrity (SHA256SUMS) | ✅ | deterministic checksums on backup; restore verifies checksums, rejects hostile files + escaping symlinks, warns on extras; legacy snapshots warn | — (manifest/checksum signing: not-required) |
+| P2 — Portability | 🚧 | `SUPPORTED_ARCHS`/`SUPPORTED_UBUNTU_RELEASES` gate, `ARCH_NORM`, manifest arch/os records checked by `--source` preflight | **Per-entry compat constraints + config-format migration hooks.** Resume: `inventory/schema.yaml` (per-app arch/release gates), `lib/catalog.sh` (Chrome AMD64 gate), `lib/installers.sh`, tests |
+| P2 — Avoid backing up auth blindly | ⬜ | `exclude:` lists keep some token dirs out; docs post-restore checklist (RESTORE.md §5) | **`include:` lists + `secret` class + encrypted-secret workflow.** Resume: schema (shared with the classification item), `backup.sh`, docs |
+| P2 — Reduce catalog/inventory drift | 🔓 | — (nothing shipped; the blocker — an automated test suite — landed 2026-08-02) | **`catalog:` + `overrides:` resolution + drift-report.** Resume: `lib/catalog.sh`, `inventory.sh`, resolve effective entries in `--plan`, tests |
+| P2 — Testing strategy | ✅ | `tests/` plain-bash harness, 7 files, **202 assertions**: unit (integrity/rollback/journal/manifest/paths/phases) + interrupted-backup regression + static guards (bash -n, schema, no `rsync --delete`) | — (shellcheck + full-system VM tests tracked under the VM rehearsal item) |
+| Suggested target layout | ⛔ | not-required (flat root scripts + `lib/` works at current scale) | — |
+
+**Progress log (2026-08-02)** — shipped this session:
+
+1. P0 — manifest staging isolation + atomic publication rollback (in `3b10951` "harden transactional publication").
+2. P1 — schema v2 structured installers + versioned validation (`9002629`).
+3. P0 — `--source` external-snapshot restore + P1 SHA256SUMS integrity (`d0aec8c`).
+4. P1 — conflict policies + rollback bundle + restore journal, schema v3 (`3659fd8`).
+5. P2 — automated test suite (`tests/`, 7 files / 202 assertions) — **uncommitted**.
+6. P1 — resumable-phase flags + durable phase journal — **uncommitted**.
 
 ### P0 — Preserve the previous known-good manifest — ✅ completed
 
@@ -208,6 +219,8 @@ Use a real YAML/schema validator rather than ad hoc parsing for structural check
 
 **Status:** 🚧 in-progress — the `config_paths` vs `user_dirs` split plus per-app `exclude:` lists already cover config / user-data / cache / binary in practice. Not implemented: the explicit per-path `class:` model (config/state/user_data/cache/binary/secret) and the pre-backup scanner warning about credentials/keys/sockets.
 
+**Resume here (concrete next step):** (1) add an optional `class` enum (`config|state|user_data|cache|binary|secret`, default `config`) to `config_paths` in `inventory/schema.yaml`; (2) honor `cache`/`binary`/`secret` in the `backup.sh` capture loop (skip them); (3) add a pre-backup scanner to `backup.sh` that warns on likely credential files (names/patterns: `token`, `key`, `.aws`, `.ssh`, browser profile dirs, `.docker/config.json`) without printing contents; (4) unit tests in `tests/`.
+
 The current model distinguishes application configuration and user directories, which is a good start. It needs an explicit data classification model:
 
 ```yaml
@@ -253,9 +266,11 @@ Before modifying a destination, create a timestamped local rollback bundle. Gene
 
 Avoid broad `rsync --delete` behavior for home-directory content unless a path explicitly opts in.
 
-### P1 — Introduce explicit restore phases and resumability — 🚧 in-progress
+### P1 — Introduce explicit restore phases and resumability — ✅ completed (2026-08-02)
 
-**Status:** 🚧 in-progress — explicit phases 1–6 with idempotent re-runs, accumulated nonzero exit codes, and continue-on-installer-failure are in place. Not implemented: `--plan`, `--from-phase`, `--only`, `--skip`, `--non-interactive`, and a durable phase journal.
+**Status:** ✅ completed (2026-08-02) — `--plan` (phase-by-phase preview + dry-run detail), `--from-phase <phase>`, `--only`/`--skip <phases,apps>`, and `--non-interactive` are implemented in restore.sh. Phase names gate whole phases; app names filter the apps phase (so the handoff's `--only code,docker` example works), and `user-data` is accepted as an alias for the dotfiles phase. Unknown names in `--only`/`--skip` die (typo guard). The rollback bundle + journal are now created **up front** on real (non-dry-run) runs, and every enabled phase writes `phase-start`/`phase-done` markers to `restore-journal.log` — the durable phase journal. Gating lives in `lib/common.sh` (`phase_enabled`/`app_selected`/`phase_canonical`) and is unit-tested in `tests/test_phases.sh` (76 assertions).
+
+Note: the flags map onto the EXISTING six phases (base/packages/apps/services/dotfiles/postinstall) rather than the aspirational 11-phase model sketched below — the finer split (preflight, package repositories, verification, …) would fragment the journal and add no behavioral value for a personal tool; the six-phase model is documented in docs/RESTORE.md.
 
 Use a phase model with durable state:
 
@@ -286,6 +301,8 @@ Package installation failures should not silently disappear. Continue where safe
 ### P1 — Improve backup completeness semantics — 🚧 in-progress
 
 **Status:** 🚧 in-progress — per-artifact `captured`/`missing`/`incomplete`/`empty`, overall `ok`/`degraded`, and restore's `status: ok` requirement (with `--force-incomplete` override) are in place. Not implemented: per-item `required: true` / `on_missing:` policy and the finer `ok_with_warnings` / `failed` status granularity.
+
+**Resume here:** (1) schema v4: optional per-app `required: true` and `on_missing: fail|warn`; (2) `record_artifact` in `backup.sh` distinguishes `missing` (required) from `missing-optional`; (3) `manifest_final` in `lib/common.sh` derives `ok_with_warnings`/`failed` from the artifact counts; (4) `manifest_verify_restorable` accepts `ok_with_warnings`, requires `--force-incomplete` for `degraded`, rejects `failed`; (5) extend `tests/test_manifest.sh`.
 
 **Retrieved facts**
 
@@ -336,6 +353,8 @@ At restore time:
 
 **Status:** 🚧 in-progress — `SUPPORTED_ARCHS` / `SUPPORTED_UBUNTU_RELEASES` gate, arch normalisation (`ARCH_NORM`), and manifest `arch:`/`ubuntu_version:` records (now also checked by the `--source` preflight) are in place. Not implemented: per-entry compatibility constraints and config-format migration hooks.
 
+**Resume here:** (1) per-entry `installer.arch:`/`installer.releases:` gates in `inventory/schema.yaml` + `lib/installers.sh` (deb/tarball URLs already template `{arch}`); (2) gate the AMD64-only Google Chrome catalog entry (`lib/catalog.sh`); (3) migration hooks for config formats that changed across releases (typed per-app actions, not free-form scripts); (4) tests in `tests/`.
+
 Record and validate:
 
 - Ubuntu release and codename
@@ -355,6 +374,8 @@ The current Google Chrome installer is explicitly AMD64-specific in the catalog 
 
 **Status:** ⬜ pending — per-app `include:` lists, secret classification, and an encrypted-secret workflow are not implemented. Docs carry a manual post-restore checklist (RESTORE.md § 5) and `exclude:` lists keep some token dirs out — that covers the symptom, not the policy.
 
+**Resume here (do together with the P1 classification item — same schema surface):** (1) optional `include:` globs per `config_paths` (back up only what is listed); (2) `class: secret`; (3) a `--no-secrets` backup mode or an encrypted-secret workflow; (4) extend the post-restore auth checklist (RESTORE.md §5).
+
 Several declared configuration directories commonly contain authentication state or tokens, such as GitHub CLI, Google Cloud, Azure, Docker, browser profiles, and Cloudflare-related configuration (`inventory/inventory.yaml:75-281`).
 
 Use per-app include lists rather than copying entire configuration roots wherever possible. For authentication:
@@ -366,7 +387,9 @@ Use per-app include lists rather than copying entire configuration roots whereve
 
 ### P2 — Reduce catalog/inventory drift — ⬜ pending
 
-**Status:** ⬜ pending — the inventory still repeats full values; the `catalog: <name>` + `overrides:` resolution model and a drift-report command are not implemented.
+**Status:** 🔓 unblocked — the dependency noted in the body ("after behavior is covered by tests") landed 2026-08-02: the automated test suite (`tests/`, 7 files / 202 assertions) is the safety net for this refactor. The `catalog: <name>` + `overrides:` resolution model and a drift-report command are still not implemented.
+
+**Resume here:** (1) schema: `catalog: <name>` + `overrides:` on apps (reference a catalog template instead of repeating values); (2) resolve effective entries in `inventory.sh list` and print resolved values in `restore.sh --plan`; (3) a drift-report command (`inventory.sh review --drift`) diffing inventory vs catalog defaults; (4) tests in `tests/`.
 
 The catalog contains templates while the inventory repeats full generated values. That makes future catalog fixes ineffective for existing entries.
 
@@ -382,9 +405,17 @@ Store:
 
 Resolve the effective inventory at runtime and print it during `--plan`. Add a command to show drift between inventory entries and current catalog defaults.
 
-### P2 — Testing strategy — 🚧 in-progress
+### P2 — Testing strategy — ✅ completed (2026-08-02)
 
-**Status:** 🚧 in-progress — `shellcheck` and inventory schema validation run as static checks (a shellcheck pass is recorded in docs/PLAN.md). Not implemented: no automated unit/integration/VM test suite (no `tests/` dir), and the interrupted-backup regression test exists only as a manual/live check, not an automated one.
+**Status:** ✅ completed — `tests/` is a plain-bash assertion harness (deliberately not Bats/ShellSpec: no extra dependency, mirrors the repo's bash-only style). `./tests/run.sh` runs everything and exits non-zero on any failure. Coverage:
+
+- **Static checks** (`tests/test_static.sh`) — `bash -n` on every production + test script, real-inventory schema validation, schema v3 `conflict_policy` variant acceptance/rejection, and a regression guard asserting no `rsync --delete` invocation exists in backup.sh/restore.sh/lib (the critical conflict-policy data-loss bug).
+- **Unit tests** — integrity helpers (checksum generation/verification, tamper, escaping symlink, FIFO, extra-file warn), rollback bundle + restore journal + `conflict_policy_get`, manifest helpers (staging-only `in_progress` marker, final status derivation, restorable verification), path safety (traversal + control-char rejection).
+- **Interrupted-backup regression** (`tests/test_interrupted_backup.sh`) — `in_progress` marker isolation (live manifest never modified in place) plus `publish_backup` success / degraded-rollback / manifest-less-rollback / fail-fast (previous backup untouched) in a fully sandboxed repo.
+
+The suite's first runs caught two real bugs, both fixed: a NUL-truncated control-character check in `normalize_path` (the `$'[\x00-\x1f\x7f]'` grep pattern embedded a literal NUL and silently let control chars through), and `conflict_policy_get` returning empty instead of `merge` for unknown owners.
+
+Still out of scope here: `shellcheck` (tracked separately in docs/PLAN.md) and the full-system VM tests, which live under the VM rehearsal item (P2, item 9 below).
 
 The roadmap notes that disposable-environment rehearsal remains important. Build an automated test pyramid:
 
@@ -478,15 +509,15 @@ backup-restore-ubuntu/
 ## Recommended implementation order
 
 1. ✅ done — Fix manifest staging and publication rollback (`manifest_in_progress` → staging only; `publish_backup` with rollback).
-2. ⬜ pending — Add regression tests for interrupted backup and previous-generation preservation (folded into the P2 Testing item).
+2. ✅ done — Add regression tests for interrupted backup and previous-generation preservation (2026-08-02: `tests/test_interrupted_backup.sh` + the full `tests/` suite — see the P2 Testing item).
 3. ✅ done — Add explicit `--source` snapshot selection and preflight verification (2026-08-02).
 4. ✅ done — Add checksums and hostile-file/symlink validation (P1 integrity).
-5. 🚧 partial — Add restore journal, conflict policies, and resumable phases (conflict policies + rollback bundle + journal done 2026-08-02; the resumable-phase flags `--plan`/`--from-phase`/`--only`/`--skip` are still pending).
+5. ✅ done — Add restore journal, conflict policies, and resumable phases (conflict policies + rollback bundle + journal 2026-08-02; resumable-phase flags `--plan`/`--from-phase`/`--only`/`--skip`/`--non-interactive` + durable phase journal 2026-08-02).
 6. ✅ done — Introduce schema versioning and strict inventory validation.
 7. ✅ done — Replace opaque custom commands incrementally with typed installers.
-8. ⬜ pending — Add secret classification and encrypted-secret guidance.
-9. 🚧 in-progress — Add VM-based end-to-end restore rehearsal (VirtualBox rehearsal reached app 16/24; full clean run still outstanding — docs/PLAN.md).
-10. ⬜ pending — Refactor catalog/inventory duplication after behavior is covered by tests.
+8. ⬜ pending (next-up with the classification item) — Add secret classification and encrypted-secret guidance. **Resume:** see the P2 "Avoid backing up auth blindly" item — `include:` lists + `class: secret` + encrypted workflow.
+9. 🚧 in-progress — Add VM-based end-to-end restore rehearsal (VirtualBox rehearsal reached app 16/24; full clean run still outstanding — docs/PLAN.md). **Resume:** complete a full clean rehearsal run per docs/REHEARSAL-VIRTUALBOX.md §6.7–6.8 (static guest `/etc/resolv.conf` + unlocked screen — lessons already baked in), then an idempotency re-run.
+10. 🔓 unblocked (tests landed 2026-08-02) — Refactor catalog/inventory duplication. **Resume:** see the P2 "Reduce catalog/inventory drift" item — `catalog:` + `overrides:` + drift-report, with the test suite as the safety net.
 
 ## Generated Repository Evidence
 
@@ -498,4 +529,4 @@ backup-restore-ubuntu/
 - **Important source files inspected:** `backup.sh`, `restore.sh`, `lib/common.sh`, `lib/catalog.sh`, `inventory/inventory.yaml`
 - **Key finding:** the in-progress manifest is written to the live backup before staged publication, which can invalidate the previous known-good backup after interruption
 - **Gaps:** no commands or tests were executed; backup payloads were not inspected; the repository-evidence generator rejected its request, so this analysis used targeted reads
-- **Recommended next step (2026-08-02):** the P0 transaction and `--source` items are deployed. Next highest-value open items: **P1 integrity verification (SHA256SUMS)** and **P1 restore conflict policies / completeness semantics** — then the automated test suite (P2 testing) to lock the P0 fixes in as regression tests.
+- **Recommended next step (updated 2026-08-02):** all P0 items, P1 integrity / conflict-policies / phases / installers / schema, and the P2 test suite are shipped. Next open items, in order: **P1 backup completeness semantics** (finer `ok_with_warnings`/`failed` + per-item `required:`), then **P1 config/state/secrets classification** (which also unlocks P2 auth-blind backup), then **P2 catalog/inventory drift** (unblocked by tests). The **VM rehearsal** (item 9) continues independently — a full clean run is the remaining outstanding item.

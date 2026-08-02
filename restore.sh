@@ -21,17 +21,43 @@ PACKAGES_ONLY=0
 FORCE_INCOMPLETE=0
 RESTORE_SOURCE=""
 BACKUP_LABEL="backups/"   # user-facing name of the config source (set to the snapshot under --source)
+PLAN=0                    # --plan: dry-run preview + phase plan summary
+PHASES_FROM=""           # --from-phase NAME: skip every phase before NAME
+# Raw --only/--skip tokens; classified into phase vs app names after yq is
+# available (see the "Resolve --only/--skip selections" block below).
+declare -a RAW_ONLY=() RAW_SKIP=()
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run)      DRY_RUN=1 ;;
     --yes|-y)       ASSUME_YES=1 ;;
+    --plan)         PLAN=1; DRY_RUN=1 ;;
+    --non-interactive) ASSUME_YES=1 ;;  # never prompt (implies --yes)
+    --from-phase)
+      shift
+      PHASES_FROM="${1:-}"
+      _c="$(phase_canonical "$PHASES_FROM")"
+      [ -n "$_c" ] || die "--from-phase requires a phase name: ${PHASE_ORDER[*]} (alias: user-data)."
+      PHASES_FROM="$_c"
+      ;;
+    --only)
+      shift
+      [ -n "${1:-}" ] || die "--only requires a comma-separated list of phases and/or apps."
+      IFS=',' read -ra _tokens <<< "$1"
+      RAW_ONLY+=("${_tokens[@]}")
+      ;;
+    --skip)
+      shift
+      [ -n "${1:-}" ] || die "--skip requires a comma-separated list of phases and/or apps."
+      IFS=',' read -ra _tokens <<< "$1"
+      RAW_SKIP+=("${_tokens[@]}")
+      ;;
     --upgrade-base) DO_UPGRADE=1 ;;
     --configs-only) CONFIGS_ONLY=1 ;;
     --packages-only) PACKAGES_ONLY=1 ;;
     --force-incomplete) FORCE_INCOMPLETE=1 ;;
     --source)       shift; RESTORE_SOURCE="${1:-}"; [ -n "$RESTORE_SOURCE" ] || die "--source requires a snapshot directory argument." ;;
-    *) die "Unknown option: $1 (usage: $0 [--source <snapshot-dir>] [--dry-run] [--yes] [--upgrade-base] [--configs-only|--packages-only] [--force-incomplete])" ;;
+    *) die "Unknown option: $1 (usage: $0 [--source <snapshot-dir>] [--plan] [--from-phase <phase>] [--only|--skip <phases,apps>] [--dry-run] [--yes|--non-interactive] [--upgrade-base] [--configs-only|--packages-only] [--force-incomplete])" ;;
   esac
   shift
 done
@@ -53,6 +79,24 @@ require_cmd sudo
 
 # Validate inventory before touching anything.
 validate_inventory || die "Inventory validation failed — fix inventory.yaml and re-run."
+
+# --- Resolve --only/--skip selections -------------------------------------
+# Phase names gate whole phases (phase_enabled); app names filter the apps
+# phase (app_selected). Unknown names die — a typo must never silently restore
+# the wrong set. Classification lives in lib/common.sh (apply_selection) so
+# the typo guard is unit-tested.
+PHASES_ONLY=(); APPS_ONLY=(); PHASES_SKIP=(); APPS_SKIP=()
+_app_names="$(yaml_list '.apps[] | .name')"
+apply_selection only "$_app_names" "${RAW_ONLY[@]}"
+apply_selection skip "$_app_names" "${RAW_SKIP[@]}"
+# Warn when app filters are set but the apps phase itself is disabled by
+# phase gating (e.g. --skip apps --only code,git would silently process no
+# apps).
+if [ "${#APPS_ONLY[@]}" -gt 0 ] || [ "${#APPS_SKIP[@]}" -gt 0 ]; then
+  if ! phase_enabled apps; then
+    warn "--only/--skip app names given, but the apps phase is disabled by phase gating — no apps will be processed."
+  fi
+fi
 
 # --- Optional external backup source (--source) ---------------------------
 # With --source, restore reads configuration DIRECTLY from the given backup
@@ -179,6 +223,36 @@ elif [ "$PACKAGES_ONLY" = "1" ] && [ "$DRY_RUN" = "0" ] && [ "$ASSUME_YES" = "0"
   confirm "This will install packages only (no configuration will be restored). Continue?" "n" || die "Aborted."
 fi
 
+# --- Durable phase journal -------------------------------------------------
+# Create the rollback bundle + journal up front (non-dry-run) so every phase
+# records phase-start/phase-done markers even when nothing is captured yet
+# (e.g. --packages-only). Dry-run/--plan create nothing. phase-done is
+# recorded even when the phase had failures — per-item failures are journaled
+# and accumulated in the exit code separately.
+if [ "$DRY_RUN" != "1" ]; then
+  rollback_init
+fi
+
+# --- Restore plan (--plan) -------------------------------------------------
+if [ "$PLAN" = "1" ]; then
+  echo
+  echo "Restore plan (--plan):"
+  for _p in "${PHASE_ORDER[@]}"; do
+    if phase_enabled "$_p"; then
+      printf '  [x] %-12s will run\n' "$_p"
+    else
+      printf '  [ ] %-12s skipped\n' "$_p"
+    fi
+  done
+  if [ "${#APPS_ONLY[@]}" -gt 0 ]; then
+    printf '  apps: %s only\n' "${APPS_ONLY[*]}"
+  elif [ "${#APPS_SKIP[@]}" -gt 0 ]; then
+    printf '  apps: all except %s\n' "${APPS_SKIP[*]}"
+  fi
+  echo "  (every step below is a preview — nothing is modified)"
+  echo
+fi
+
 # --- Check required tools -------------------------------------------------
 # rsync is needed for config restore; ensure it's available.
 if [ "$PACKAGES_ONLY" != "1" ] && [ "$BACKUPS_PRESENT" = "1" ]; then
@@ -198,10 +272,9 @@ mark_failure() {
 }
 
 # --- Phase 1: base system -------------------------------------------------
-if [ "$CONFIGS_ONLY" = "1" ]; then
-  info "Phase 1/5: base system (skipped — --configs-only)"
-else
-  info "Phase 1/5: base system"
+if phase_enabled base; then
+  journal_log "phase-start" "base"
+  info "Phase 1/6: base system"
   run sudo apt-get update || mark_failure "$EXIT_PREREQ_FAILED"
   if [ "$DO_UPGRADE" = "1" ]; then
     info "(--upgrade-base: apt full-upgrade of the whole base OS)"
@@ -210,13 +283,15 @@ else
   else
     info "(base OS full-upgrade skipped by default — opt in with --upgrade-base)"
   fi
+  journal_log "phase-done" "base"
+else
+  info "Phase 1/6: base system (skipped)"
 fi
 
 # --- Phase 2: packages ----------------------------------------------------
-if [ "$CONFIGS_ONLY" = "1" ]; then
-  info "Phase 2/5: packages (skipped — --configs-only)"
-else
-  info "Phase 2/5: packages"
+if phase_enabled packages; then
+  journal_log "phase-start" "packages"
+  info "Phase 2/6: packages"
 
 install_apt_packages() {
   local -a pkgs=() p
@@ -271,19 +346,24 @@ install_flatpak_apps() {
 install_apt_packages
 install_snap_packages
 install_flatpak_apps
+  journal_log "phase-done" "packages"
+else
+  info "Phase 2/6: packages (skipped)"
 fi
 
 # --- Phase 3: apps --------------------------------------------------------
-info "Phase 3/5: apps"
+# (the helper functions below stay at top level — restore_config_tree is also
+# used by the services phase)
 
 # restore_config_tree OWNER POLICY SRC DEST RBREL [SUDO...]
 # Apply one backed-up config tree to DEST honouring the owner's conflict
 # policy: merge (default, additive overlay), replace (preserve existing into
-# the rollback bundle, then mirror the backup exactly with --delete),
-# skip-existing (only missing files), prompt (ask per path; non-interactive
-# runs skip). Every run first captures what already exists into the rollback
-# bundle and journals created/replaced/skipped. SUDO... is a prefix for
-# root-owned targets.
+# the rollback bundle, then remove ONLY the exact leaf counterparts the
+# backup would restore and merge-restore — never rsync --delete against the
+# dest root, which would wipe unrelated data), skip-existing (only missing
+# files), prompt (ask per path; non-interactive runs skip). Every run first
+# captures what already exists into the rollback bundle and journals
+# created/replaced/skipped. SUDO... is a prefix for root-owned targets.
 restore_config_tree() {
   local owner="$1" policy="$2" src="$3" dest="$4" rb="$5"; shift 5
   local -a sudo_prefix=("$@")
@@ -453,20 +533,28 @@ install_app() {
   fi
 }
 
-# Bootstrap backends before starting app installs.
-if [ "$CONFIGS_ONLY" != "1" ]; then
-  bootstrap_backends
+if phase_enabled apps; then
+  journal_log "phase-start" "apps"
+  info "Phase 3/6: apps"
+  # Bootstrap backends before starting app installs.
+  if [ "$CONFIGS_ONLY" != "1" ]; then
+    bootstrap_backends
+  fi
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    if app_selected "$name"; then
+      info "App: $name"
+      install_app "$name"
+    else
+      info "App: $name (skipped — not in --only / in --skip)"
+    fi
+  done < <(yaml_list '.apps[] | .name')
+  journal_log "phase-done" "apps"
+else
+  info "Phase 3/6: apps (skipped)"
 fi
 
-while IFS= read -r name; do
-  [ -n "$name" ] || continue
-  info "App: $name"
-  install_app "$name"
-done < <(yaml_list '.apps[] | .name')
-
 # --- Phase 4: services -----------------------------------------------------
-info "Phase 4/5: services"
-
 restore_services() {
   local unit target enable start sdir dest policy
   while IFS=$'\t' read -r unit target enable start; do
@@ -535,13 +623,19 @@ restore_services() {
   done < <(yq -r '.services[] | [.unit, (.target // "system"), (.enable // false | tostring), (.start // false | tostring)] | @tsv' "$INVENTORY_FILE")
 }
 
-restore_services
+if phase_enabled services; then
+  journal_log "phase-start" "services"
+  info "Phase 4/6: services"
+  restore_services
+  journal_log "phase-done" "services"
+else
+  info "Phase 4/6: services (skipped)"
+fi
 
 # --- Phase 5: dotfiles + user dirs -------------------------------------------
-if [ "$PACKAGES_ONLY" = "1" ]; then
-  info "Phase 5/5: dotfiles & user dirs (skipped — --packages-only)"
-else
-info "Phase 5/5: dotfiles & user dirs"
+if phase_enabled dotfiles; then
+  journal_log "phase-start" "dotfiles"
+  info "Phase 5/6: dotfiles & user dirs"
 
 restore_dotfiles() {
   local df
@@ -599,16 +693,16 @@ restore_user_dirs() {
   done < <(yaml_list '.user_dirs[]')
 }
 
-restore_user_dirs
+  restore_user_dirs
+  journal_log "phase-done" "dotfiles"
+else
+  info "Phase 5/6: dotfiles & user dirs (skipped)"
 fi
 
 # --- Phase 6: post-install (groups, shell, extensions, models) ------------
-if [ "$CONFIGS_ONLY" = "1" ]; then
-  info "Phase 6/6: post-install (skipped — --configs-only)"
-elif [ "$PACKAGES_ONLY" = "1" ]; then
-  info "Phase 6/6: post-install (skipped — --packages-only)"
-else
-info "Phase 6/6: post-install (groups, shell, extensions)"
+if phase_enabled postinstall; then
+  journal_log "phase-start" "postinstall"
+  info "Phase 6/6: post-install (groups, shell, extensions)"
 
 # --- Groups ---
 while IFS= read -r g; do
@@ -667,8 +761,10 @@ while IFS= read -r name; do
         warn "  $name: extensions not supported for this app type"
         ;;
     esac
-  done
-done < <(yaml_list '.apps[] | .name')
+  done  done < <(yaml_list '.apps[] | .name')
+  journal_log "phase-done" "postinstall"
+else
+  info "Phase 6/6: post-install (skipped)"
 fi
 
 # --- Wrap-up ---------------------------------------------------------------

@@ -10,5 +10,9 @@ backups.artifacts
 # Runtime flock lock file (created while a backup run is active).
 .backup.lock
 
+# Test sandboxes — tests/helpers.sh creates scratch dirs under the repo root
+# (the snap-packaged yq cannot read /tmp).
+.test-tmp.*
+
 # Legacy single-backup folder from the old script (superseded by backups/) — never re-add.
 backup/

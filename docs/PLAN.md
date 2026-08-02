@@ -109,6 +109,23 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   timestamped rollback bundle under `~/.local/state/backup-restore-ubuntu/rollback-<ts>/`
   (outside the backup source) and journals created/replaced/skipped/failed. `--dry-run`
   creates nothing; user-dirs stay merge-only (never delete user data).
+- ✅ Restore resumability (P1, handoff item 5): `--plan` preview (phase-by-phase table +
+  dry-run detail), `--from-phase <phase>` (skip everything before a phase),
+  `--only`/`--skip` (phase names gate whole phases; app names filter the apps phase;
+  `user-data` is an alias for the dotfiles phase), and `--non-interactive` (never prompt).
+  The rollback bundle + journal are created up front on real runs and every enabled phase
+  writes `phase-start`/`phase-done` markers — the durable phase journal. Phase gating
+  lives in `lib/common.sh` (pure functions, unit-tested in `tests/test_phases.sh`);
+  unknown phase/app names in `--only`/`--skip` die (typo guard).
+- ✅ Automated test suite (P2 testing): `tests/run.sh` — plain-bash unit tests for the
+  integrity, rollback/journal/conflict-policy, manifest and path helpers;
+  interrupted-backup regression (staging-only `in_progress` marker + `publish_backup`
+  success/rollback/fail-fast in a fully sandboxed repo); static checks (`bash -n` on
+  every script, real-inventory schema validation + `conflict_policy` variants, and a
+  guard asserting no `rsync --delete` invocation in backup.sh/restore.sh/lib — the
+  critical-bug regression). The suite's first runs caught two real bugs, both fixed:
+  a NUL-truncated control-char check in `normalize_path` and `conflict_policy_get`
+  returning empty (instead of `merge`) for unknown owners.
 - ⬜ Run `shellcheck` on all updated scripts.
 
 ## Commit strategy

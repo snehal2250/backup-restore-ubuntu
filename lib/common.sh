@@ -172,8 +172,14 @@ normalize_path() {
   case "$p" in
     *..*) err "Path contains '..' traversal — rejected: $1"; return 1 ;;
   esac
-  # Reject control characters.
-  if printf '%s' "$p" | grep -q $'[\x00-\x1f\x7f]'; then
+  # Reject control characters. LC_ALL=C + [[:cntrl:]] over a here-string
+  # catches every control byte except an embedded newline (grep treats \n as
+  # a line terminator), so reject those explicitly too. Never pipe into
+  # grep -q here: under set -o pipefail a match would SIGPIPE the writer and
+  # turn a hit into a 141 'failure'. The previous $'[\x00-\x1f\x7f]' pattern
+  # embedded a literal NUL byte, which truncated the pattern and silently let
+  # control characters through.
+  if [[ "$p" == *$'\n'* ]] || LC_ALL=C grep -q '[[:cntrl:]]' <<< "$p" 2>/dev/null; then
     err "Path contains control characters — rejected: $1"; return 1
   fi
   printf '%s\n' "$p"
@@ -880,12 +886,15 @@ is_app_installed() {
 # KIND is 'app' (NAME = app name) or 'service' (NAME = unit file).
 conflict_policy_get() {
   require_yq "$YQ_AUTO"
-  local kind="$1" owner="$2"
+  local kind="$1" owner="$2" val=""
   case "$kind" in
-    app)     N="$owner" yq -r ".apps[] | select(.name == strenv(N)) | .conflict_policy // \"merge\"" "$INVENTORY_FILE" ;;
-    service) U="$owner" yq -r ".services[] | select(.unit == strenv(U)) | .conflict_policy // \"merge\"" "$INVENTORY_FILE" ;;
-    *) echo "merge" ;;
+    app)     val="$(N="$owner" yq -r ".apps[] | select(.name == strenv(N)) | .conflict_policy // \"merge\"" "$INVENTORY_FILE")" ;;
+    service) val="$(U="$owner" yq -r ".services[] | select(.unit == strenv(U)) | .conflict_policy // \"merge\"" "$INVENTORY_FILE")" ;;
   esac
+  # Unknown owners (an app/service the inventory no longer declares, or a
+  # non-app/non-service kind) default to the historical safe behavior.
+  [ -n "$val" ] || val="merge"
+  printf '%s\n' "$val"
 }
 
 # --- Rollback bundle + restore journal ------------------------------------
@@ -898,7 +907,114 @@ conflict_policy_get() {
 # restored. Dry-run prints the operations instead of executing them.
 ROLLBACK_DIR=""
 
+# --- Restore phase framework (resumability) ------------------------------
+# restore.sh runs in six canonical phases, each gated by phase_enabled. The
+# resumability flags map onto them: --from-phase (start later), --only/--skip
+# (accept phase names AND app names — app names filter the apps phase via
+# app_selected, matching the handoff's `--only code,docker` example).
+# 'user-data' is accepted as an alias for the 'dotfiles' phase (that phase
+# covers dotfiles AND user dirs). Pure functions — unit-tested in
+# tests/test_phases.sh.
+PHASE_ORDER=(base packages apps services dotfiles postinstall)
+
+# Resumability flag state (set by restore.sh; defaults keep the helpers pure
+# so tests can source common.sh and call them directly).
+PHASES_FROM=""
+PHASES_ONLY=()
+PHASES_SKIP=()
+APPS_ONLY=()
+APPS_SKIP=()
+PLAN=0
+
+# phase_canonical NAME -> canonical phase name (resolves the 'user-data'
+# alias); empty if NAME is not a phase name.
+phase_canonical() {
+  case "$1" in
+    base|packages|apps|services|dotfiles|postinstall) printf '%s\n' "$1" ;;
+    user-data) printf 'dotfiles\n' ;;
+  esac
+}
+
+# phase_enabled NAME -> 0 if the phase should run, 1 if it must be skipped.
+# Combines the legacy modes (--configs-only / --packages-only) with the
+# resumability flags (--from-phase / --only / --skip). App names given to
+# --only/--skip never gate whole phases — they filter the apps phase via
+# app_selected.
+phase_enabled() {
+  local name="$1"
+  case "$name" in
+    base|packages) [ "${CONFIGS_ONLY:-0}" = "1" ] && return 1 ;;
+    dotfiles)      [ "${PACKAGES_ONLY:-0}" = "1" ] && return 1 ;;
+    postinstall)   { [ "${CONFIGS_ONLY:-0}" = "1" ] || [ "${PACKAGES_ONLY:-0}" = "1" ]; } && return 1 ;;
+  esac
+  # --from-phase NAME: skip every phase before NAME.
+  if [ -n "${PHASES_FROM:-}" ]; then
+    local before=1 n
+    for n in "${PHASE_ORDER[@]}"; do
+      [ "$n" = "$PHASES_FROM" ] && before=0
+      [ "$n" = "$name" ] && break
+    done
+    [ "$before" = "1" ] && return 1
+  fi
+  # --only: phases not listed are skipped. (The arrays are always declared
+  # empty in common.sh, so plain "${#arr[@]}"/"${arr[@]}" are safe under
+  # set -u — note "${#arr[@]:-0}" is NOT valid bash.)
+  if [ "${#PHASES_ONLY[@]}" -gt 0 ]; then
+    local o found=0
+    for o in "${PHASES_ONLY[@]}"; do
+      [ "$o" = "$name" ] && { found=1; break; }
+    done
+    [ "$found" = "0" ] && return 1
+  fi
+  # --skip: listed phases are skipped.
+  local s
+  for s in "${PHASES_SKIP[@]}"; do
+    [ "$s" = "$name" ] && return 1
+  done
+  return 0
+}
+
+# apply_selection KIND APP_NAMES TOKENS... — classify --only/--skip tokens
+# into the PHASES_*/APPS_* arrays (phase names gate phases, app names filter
+# the apps phase). APP_NAMES is the newline-separated list of declared app
+# names. Unknown tokens die (typo guard). Pure-ish — unit-tested in
+# tests/test_phases.sh.
+apply_selection() {
+  local kind="$1" app_names="$2"
+  local t c
+  shift 2
+  for t in "$@"; do
+    [ -n "$t" ] || continue
+    c="$(phase_canonical "$t")"
+    if [ -n "$c" ]; then
+      if [ "$kind" = "only" ]; then PHASES_ONLY+=("$c"); else PHASES_SKIP+=("$c"); fi
+    elif grep -Fxq "$t" <<< "$app_names"; then
+      if [ "$kind" = "only" ]; then APPS_ONLY+=("$t"); else APPS_SKIP+=("$t"); fi
+    else
+      die "--$kind: '$t' is neither a phase (${PHASE_ORDER[*]}, alias user-data) nor a declared app."
+    fi
+  done
+}
+
+# app_selected NAME -> 0 if the app should run in the apps phase. App names
+# from --only (only these) / --skip (all but these) filter the apps phase.
+app_selected() {
+  local name="$1" a
+  if [ "${#APPS_ONLY[@]}" -gt 0 ]; then
+    for a in "${APPS_ONLY[@]}"; do
+      [ "$a" = "$name" ] && return 0
+    done
+    return 1
+  fi
+  for a in "${APPS_SKIP[@]}"; do
+    [ "$a" = "$name" ] && return 1
+  done
+  return 0
+}
+
 # rollback_init: create the bundle dir + journal header (dry-run aware).
+# restore.sh calls it eagerly at restore start (non-dry-run) so every phase
+# records phase-start/phase-done markers — the durable phase journal.
 rollback_init() {
   if [ "$DRY_RUN" = "1" ]; then
     printf '[dry-run] rollback bundle + journal would be created at %s\n' "$HOME/.local/state/backup-restore-ubuntu/rollback-<timestamp>"

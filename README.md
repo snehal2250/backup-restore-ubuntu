@@ -59,6 +59,11 @@ copying of the OS itself.
 #     snapshot (e.g. a backup-* mirror snapshot on the Storage disk) — no manual
 #     copying into backups/ needed. Preflight verifies the source manifest and
 #     checks architecture / Ubuntu release / inventory compatibility.
+#   --plan = preview which phases/apps will run (dry-run)
+#   --from-phase services = resume: skip everything before this phase
+#   --only code,git = only these apps (and any listed phases) run
+#   --skip user-data = skip a phase (user-data == dotfiles) and/or apps
+#   --non-interactive = never prompt (implies --yes)
 ```
 
 Then, optionally, as a separate exercise (only after the plain restore + verification):
@@ -86,7 +91,7 @@ Keep everything current day-to-day:
 | `./inventory.sh review` | Suggest undeclared apps found on the system | ✅ |
 | `./inventory.sh wizard` | Guided flow: scan the system, declare apps one by one | ✅ |
 | `./backup.sh` | Capture configs + service units + dotfiles + `user_dirs` → `backups/`, mirror to `BACKUP_DEST` (keep last `BACKUP_KEEP`); writes `status: ok` marker in `backup-info.txt` on success | ✅ |
-| `./restore.sh` | Fresh install + config restore (config from `backups/` or `--source <snapshot>`; base OS upgrade is opt-in: `--upgrade-base`) | ⚠️ modifies system |
+| `./restore.sh` | Fresh install + config restore (config from `backups/` or `--source <snapshot>`; base OS upgrade is opt-in: `--upgrade-base`; resumable/targeted via `--plan`, `--from-phase`, `--only`, `--skip`) | ⚠️ modifies system |
 | `./update_all_ubuntu.sh` | Update apt/snap/flatpak/npm + declared apps | ⚠️ modifies system |
 | `./schedule_cron.sh` | Install a @reboot scheduled backup | ⚠️ edits crontab |
 
@@ -107,6 +112,20 @@ schedule_cron.sh           scheduled backup after reboot
 backups/                   captured configuration (git-ignored)
                            mirrored to BACKUP_DEST (default /media/vikram-athare/Storage/backup-restore-ubuntu)
 ```
+
+## Automated tests
+
+The repo has a small automated test suite — plain bash, no extra dependencies:
+
+```bash
+./tests/run.sh
+```
+
+It covers the integrity (SHA256SUMS), rollback/journal/conflict-policy, manifest,
+and path helpers; the transactional backup guarantees (interrupted-backup
+regression: staging-only `in_progress` marker, `publish_backup` success/rollback/
+fail-fast); and static guards (syntax, schema validation, no `rsync --delete` in
+production scripts). Sandboxes are git-ignored (`.test-tmp.*`).
 
 ## FAQ
 

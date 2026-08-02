@@ -212,7 +212,7 @@ cd ~/backup-restore-ubuntu
 
 Read every app: expect `already installed (found '...')` only for stock-Ubuntu items;
 everything else prints the exact `apt`/`snap`/installer command that will run. Confirm
-**Phase 4/5 services** lists `cloudflared` and its unit file exists in
+**Phase 4/6 services** lists `cloudflared` and its unit file exists in
 `backups/services/cloudflared.service/unit`.
 
 > `--dry-run` **auto-installs `yq`** just like a real run (a preview still needs to parse
