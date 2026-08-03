@@ -23,7 +23,7 @@ items for it, and the whole thing is **idempotent** — you can re-run it safely
 | 1/6 Base system | `apt-get update`; full-upgrade **only if** `--upgrade-base` (opt-in) | — |
 | 2/6 Packages | installs `apt_packages`, `snap_packages` (incl. `:classic`), `flatpak_apps` | the package lists |
 | 3/6 Apps | per app: installs `depends_apt`, then the app itself, then restores its config | `apps:` |
-| 4/6 Services | copies unit files, restores their config, then enables/starts them | `services:` |
+| 4/6 Services | copies unit files, restores their config, then enables/starts them; restores `cron_jobs` (crontab / `/etc/cron.d` files) and activates the cron daemon | `services:` + `cron_jobs:` |
 | 5/6 Dotfiles & user dirs | copies declared dotfiles to `$HOME`; restores whole `user_dirs` folders (e.g. `~/Documents`) | `dotfiles:` + `user_dirs:` |
 | 6/6 Post-install | adds `groups` (`usermod -aG`), sets `default_shell` (`chsh`), installs app `extensions`/models | `groups:`, `default_shell`, `extensions` |
 
@@ -214,7 +214,9 @@ Read the output carefully. For every app you should see one of:
 
 Also verify `Phase 4/6: services` lists your custom services and that their unit files
 exist in `backups/services/<unit>/unit` (a missing unit file is warned as
-"no unit file in backups/ — skipping").
+"no unit file in backups/ — skipping"). Declared cron jobs appear in the same phase
+(`backups/cron/<name>`); a `source: cron.d` job is skipped if its file is absent from
+`/etc/cron.d`, and a missing `source: user` crontab is reported as `empty`.
 
 Before anything else, expect a `Backup content verified (SHA256SUMS)` line: `restore.sh`
 checksum-verifies the payload and rejects hostile files (device/FIFO/socket, symlinks
@@ -273,7 +275,16 @@ app via its typed `installer:` record (`apt`/`snap`/`snap_classic`/`flatpak`/
 `/etc/systemd/system/` (system) or `~/.config/systemd/user/` (user), `daemon-reload` runs,
 then its `config_paths` (env file, config dir, ...) are restored, and **then**
 `enable`/`start` per the declaration — so the service boots with its real configuration
-on first start.
+on first start. Timers are declared as ordinary `services:` entries (e.g.
+`trading-bot-telegram.timer`, with its paired `trading-bot-telegram.service` declared
+too); the timer is enabled/started and pulls its service in.
+
+Also in this phase, declared `cron_jobs:` are restored: `source: user` replaces your
+whole crontab (the current one is first saved into the rollback bundle — crontabs can't
+be merged safely), `source: cron.d` writes the one declared `/etc/cron.d/<file>` with
+sudo. The cron package is installed when missing, the cron sources are restored, and
+**then** the daemon is enabled/started — config-before-start, like services. Under
+`--packages-only`/`--configs-only` the daemon is never activated (truthful messages).
 
 **Phase 5/6 — dotfiles & user dirs.** Each declared dotfile is copied from
 `backups/dotfiles/` to `$HOME`. Whole user-data folders declared in `user_dirs`

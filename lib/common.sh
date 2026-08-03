@@ -59,11 +59,16 @@ if [ "$BRU_ALLOW_TEST_OVERRIDES" = "1" ]; then
   INVENTORY_SCHEMA="${INVENTORY_SCHEMA:-$REPO_ROOT/inventory/schema.yaml}"   # versioned JSON Schema (draft 2020-12)
   # shellcheck disable=SC2034  # consumed by backup.sh / restore.sh after sourcing
   BACKUPS_DIR="${BACKUPS_DIR:-$REPO_ROOT/backups}"
+  # /etc/cron.d source dir for declared cron.d jobs — test-overridable so
+  # sandboxed backup/restore runs never touch the real system cron.d (same
+  # opt-in guard as the other overrides).
+  CRON_D_DIR="${CRON_D_DIR:-/etc/cron.d}"
 else
   REPO_ROOT="$(cd "$LIB_DIR/.." && pwd)"
   INVENTORY_FILE="$REPO_ROOT/inventory/inventory.yaml"
   INVENTORY_SCHEMA="$REPO_ROOT/inventory/schema.yaml"
   BACKUPS_DIR="$REPO_ROOT/backups"
+  CRON_D_DIR="/etc/cron.d"
 fi
 BACKUP_MANIFEST="$BACKUPS_DIR/backup-info.txt"
 # Path every getter/script reads inventory data from. Points at the REAL
@@ -262,6 +267,15 @@ yaml_list() {
 app_get() {
   require_yq "$YQ_AUTO"
   N="$1" yq -r ".apps[] | select(.name == strenv(N)) | $2 // \"\"" "${EFFECTIVE_INVENTORY:-$INVENTORY_FILE}"
+}
+
+# cron_job_get NAME QUERY -> scalar attribute of one cron job (empty if absent)
+# Uses environment variable to avoid YAML injection. QUERY is always a fixed
+# expression like '.source' or '.on_missing'. Null-safe: cron_jobs is OPTIONAL
+# in the schema (v3-v5 inventories may omit it), so reads use `.cron_jobs[]?`.
+cron_job_get() {
+  require_yq "$YQ_AUTO"
+  N="$1" yq -r ".cron_jobs[]? | select(.name == strenv(N)) | $2 // \"\"" "${EFFECTIVE_INVENTORY:-$INVENTORY_FILE}"
 }
 
 # installer_get NAME QUERY -> scalar attribute under .installer (empty if absent)
@@ -515,6 +529,36 @@ check_config_under_excluded() {
     done < <(app_get "$name" '.config_paths[]?')
   done < <(yaml_list '.apps[] | .name')
   return "$(( errs > 0 ? 1 : 0 ))"
+}
+
+# check_timer_pairing — for every declared service unit ending in .timer, warn
+# when the paired stem.service is neither declared in the inventory nor present
+# on disk: after a FRESH restore the timer would be installed but could never
+# fire (its service unit would not have been backed up). Warn-only by design —
+# the timer unit itself is still restorable, and the pairing may legitimately
+# target a system-provided unit. The restore path repeats this message when it
+# enables a timer whose pair is undeclared.
+check_timer_pairing() {
+  local unit stem paired found units
+  # Here-string, never `yq | grep -q` — under pipefail an early-exit grep
+  # SIGPIPEs a slow yq and turns a match into a 141 'failure' (see the
+  # default_shell check for the same convention).
+  units="$(yq -r '.services[] | .unit' "$INVENTORY_READ")"
+  while IFS= read -r unit; do
+    [ -n "$unit" ] || continue
+    [[ "$unit" == *.timer ]] || continue
+    stem="${unit%.timer}"
+    paired="$stem.service"
+    found=0
+    if grep -Fqx "$paired" <<< "$units"; then
+      found=1
+    elif [ -f "$HOME/.config/systemd/user/$paired" ] || [ -f "/etc/systemd/system/$paired" ]; then
+      found=1
+    fi
+    if [ "$found" = "0" ]; then
+      warn "  timer '$unit': paired unit '$paired' is neither declared nor on disk — after a fresh restore this timer would not fire. Declare '$paired' in services: (or remove the timer)."
+    fi
+  done < <(yaml_list '.services[] | .unit')
 }
 
 # check_config_overlaps: cross-owner path ownership (apps, services, user_dirs).
@@ -776,6 +820,26 @@ validate_inventory() {
     warn "  duplicate service unit names: $dupes"
     errors=$((errors + 1))
   fi
+
+  # 4b) Unique cron job names. Null-safe (.cron_jobs[]?) — cron_jobs is
+  #     OPTIONAL (v3-v5 inventories may omit it).
+  dupes="$(yaml_list '.cron_jobs[]? | .name' | sort | uniq -d)"
+  if [ -n "$dupes" ]; then
+    warn "  duplicate cron job names: $dupes"
+    errors=$((errors + 1))
+  fi
+
+  # 4c) At most ONE source: user cron job — the running user has a single
+  #     crontab; more than one entry would capture the same crontab N times.
+  local n_user_cron
+  n_user_cron="$(yq -r '[.cron_jobs[]? | select(.source == "user")] | length' "$INVENTORY_READ")"
+  if [ "${n_user_cron:-0}" -gt 1 ]; then
+    warn "  cron_jobs: more than one entry with source: user — the running user has a single crontab; keep at most one."
+    errors=$((errors + 1))
+  fi
+
+  # 4d) Timer pairing hint (warn-only, never fails validation).
+  check_timer_pairing
 
   # 5) default_shell must be provided by a declared package — either a declared
   #    app name, a declared apt package, the package name an apt-installed app

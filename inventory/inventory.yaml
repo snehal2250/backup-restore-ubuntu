@@ -56,9 +56,18 @@
 #                default_shell: optional (top-level), the login shell to set via chsh
 #                  (e.g. /usr/bin/fish). The shell package must be declared as an app.
 #   * services:  only CUSTOM services the user installed; target system|user
+#                (timer units like foo.timer are declared here too — a timer's
+#                paired foo.service should be declared as well, see the pairing
+#                check in validate_inventory)
+#   * cron_jobs: which cron scheduling the repo manages. source: user = the
+#                running user's crontab (crontab -l / crontab <file> — whole-
+#                crontab replace with rollback capture at restore); source:
+#                cron.d = the file /etc/cron.d/<file> (restored with sudo).
+#                The CONTENT lives in the backup — declare only WHICH sources.
+#                At most one source: user entry. Names: no dots for cron.d files.
 # =============================================================================
 
-schema_version: 5 # must match inventory/schema.yaml (bump both together); 4 and 3 still validate during the transition
+schema_version: 6 # must match inventory/schema.yaml (bump both together); 3-5 still validate during the transition
 profile: workstation # machine profile, validated against the schema
 default_shell: /usr/bin/fish
 apt_packages: []
@@ -232,30 +241,6 @@ apps:
     check_cmd: "sqlitebrowser"
     config_paths:
       - "~/.config/sqlitebrowser"
-  - name: "stacer"
-    description: "System optimizer & monitor (official apt)"
-    installer:
-      type: apt
-    check_cmd: "stacer"
-    config_paths:
-      - "~/.config/stacer"
-  - name: "sublime-text"
-    description: "Sublime Text editor (official apt repo)"
-    installer:
-      type: apt_repository
-      url: "https://download.sublimetext.com/"
-      suite: "apt/stable/"
-      components: []
-      key_url: "https://download.sublimetext.com/sublimehq-pub.gpg"
-      packages:
-        - "sublime-text"
-    check_cmd: "sublime_text"
-    depends_apt:
-      - "curl"
-    config_paths:
-      - "~/.config/sublime-text"
-    exclude:
-      - "Log"
   - name: "freebuff"
     description: "Freebuff AI coding assistant CLI (npm)"
     installer:
@@ -387,3 +372,40 @@ services:
     target: system
     enable: false
     start: false
+  # Dogfood: the user's systemd user TIMERS (schema v6 formalized .timer units
+  # as first-class services entries). The timer is the enabled/started entry
+  # point; its paired .service is pulled in by the timer and must NOT be
+  # auto-started at restore (it would run the bot immediately), so those are
+  # declared with enable/start false.
+  - unit: "trading-bot-end-of-day.timer"
+    target: user
+    enable: true
+    start: true
+  - unit: "trading-bot-end-of-day.service"
+    target: user
+    enable: false
+    start: false
+  - unit: "trading-bot-premium-paper.timer"
+    target: user
+    enable: true
+    start: true
+  - unit: "trading-bot-premium-paper.service"
+    target: user
+    enable: false
+    start: false
+  - unit: "trading-bot-telegram.timer"
+    target: user
+    enable: true
+    start: true
+  - unit: "trading-bot-telegram.service"
+    target: user
+    enable: false
+    start: false
+cron_jobs: []
+# Declare WHICH cron sources the repo manages — the CONTENT lives in the backup,
+# never here (add with: ./inventory.sh add-cron):
+#   - name: user-crontab
+#     source: user          # the running user's crontab (crontab -l); at most one
+#   - name: my-daily
+#     source: cron.d        # the file /etc/cron.d/<file> (restored with sudo)
+#     file: my-daily        # /etc/cron.d names must not contain dots

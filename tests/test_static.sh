@@ -120,32 +120,67 @@ else
   sandbox_cleanup
 fi
 
-t_begin "static: schema v3/v4 inventories still validate during the v5 transition"
+t_begin "static: schema v3-v6 inventories all validate (v6 transition), unknown rejected"
 if ! command -v python3 >/dev/null 2>&1 || ! python3 -c 'import jsonschema, yaml' >/dev/null 2>&1; then
   echo "  SKIP: python3 + jsonschema + yaml not available"
 else
   sandbox_new
   cp "$REPO_ROOT/inventory/inventory.yaml" "$SANDBOX/inv.yaml"
-  # schema_version 3 and 4 (pre-v5) must remain valid — every v5 change is
-  # optional (catalog references are opt-in).
-  yq -i '.schema_version = 3' "$SANDBOX/inv.yaml"
-  if python3 "$REPO_ROOT/lib/schema_check.py" "$REPO_ROOT/inventory/schema.yaml" "$SANDBOX/inv.yaml" >/dev/null 2>&1; then
-    t_pass "schema_version 3 accepted (v5 transition)"
-  else
-    t_fail "schema_version 3 was rejected (v5 should accept 3 during the transition)"
-  fi
-  yq -i '.schema_version = 4' "$SANDBOX/inv.yaml"
-  if python3 "$REPO_ROOT/lib/schema_check.py" "$REPO_ROOT/inventory/schema.yaml" "$SANDBOX/inv.yaml" >/dev/null 2>&1; then
-    t_pass "schema_version 4 accepted (v5 transition)"
-  else
-    t_fail "schema_version 4 was rejected (v5 should accept 4 during the transition)"
-  fi
+  # schema_version 3, 4 and 5 (pre-v6) must remain valid — every v6 change is
+  # optional (cron_jobs is opt-in).
+  for _v in 3 4 5 6; do
+    yq -i ".schema_version = $_v" "$SANDBOX/inv.yaml"
+    if python3 "$REPO_ROOT/lib/schema_check.py" "$REPO_ROOT/inventory/schema.yaml" "$SANDBOX/inv.yaml" >/dev/null 2>&1; then
+      t_pass "schema_version $_v accepted (v6 transition)"
+    else
+      t_fail "schema_version $_v was rejected (should stay valid during the transition)"
+    fi
+  done
   # Unknown versions must still be rejected.
-  yq -i '.schema_version = 6' "$SANDBOX/inv.yaml"
+  yq -i '.schema_version = 7' "$SANDBOX/inv.yaml"
   if python3 "$REPO_ROOT/lib/schema_check.py" "$REPO_ROOT/inventory/schema.yaml" "$SANDBOX/inv.yaml" >/dev/null 2>&1; then
-    t_fail "schema_version 6 was accepted"
+    t_fail "schema_version 7 was accepted"
   else
-    t_pass "schema_version 6 rejected"
+    t_pass "schema_version 7 rejected"
+  fi
+  sandbox_cleanup
+fi
+
+t_begin "static: schema v6 accepts valid cron_jobs, rejects invalid entries"
+if ! command -v yq >/dev/null 2>&1; then
+  echo "  SKIP: yq not installed — cron_jobs schema checks skipped"
+elif ! command -v python3 >/dev/null 2>&1 || ! python3 -c 'import jsonschema, yaml' >/dev/null 2>&1; then
+  echo "  SKIP: python3 + jsonschema + yaml not available"
+else
+  sandbox_new
+  cp "$REPO_ROOT/inventory/inventory.yaml" "$SANDBOX/inv.yaml"
+  # Valid: one user crontab + one cron.d file (file defaults are legal too).
+  yq -i '.cron_jobs = [{"name": "user-crontab", "source": "user"}, {"name": "custom-daily", "source": "cron.d", "file": "custom-daily"}]' "$SANDBOX/inv.yaml"
+  if python3 "$REPO_ROOT/lib/schema_check.py" "$REPO_ROOT/inventory/schema.yaml" "$SANDBOX/inv.yaml" >/dev/null 2>&1; then
+    t_pass "valid cron_jobs accepted"
+  else
+    t_fail "valid cron_jobs were rejected"
+  fi
+  # Invalid: cron.d without file.
+  yq -i '.cron_jobs = [{"name": "x", "source": "cron.d"}]' "$SANDBOX/inv.yaml"
+  if python3 "$REPO_ROOT/lib/schema_check.py" "$REPO_ROOT/inventory/schema.yaml" "$SANDBOX/inv.yaml" >/dev/null 2>&1; then
+    t_fail "cron.d without file was accepted"
+  else
+    t_pass "cron.d without file rejected"
+  fi
+  # Invalid: dotted file name (Debian cron ignores dotted /etc/cron.d names).
+  yq -i '.cron_jobs = [{"name": "x", "source": "cron.d", "file": "bad.name"}]' "$SANDBOX/inv.yaml"
+  if python3 "$REPO_ROOT/lib/schema_check.py" "$REPO_ROOT/inventory/schema.yaml" "$SANDBOX/inv.yaml" >/dev/null 2>&1; then
+    t_fail "dotted cron.d file name was accepted"
+  else
+    t_pass "dotted cron.d file name rejected"
+  fi
+  # Invalid: file on a source: user entry.
+  yq -i '.cron_jobs = [{"name": "x", "source": "user", "file": "nope"}]' "$SANDBOX/inv.yaml"
+  if python3 "$REPO_ROOT/lib/schema_check.py" "$REPO_ROOT/inventory/schema.yaml" "$SANDBOX/inv.yaml" >/dev/null 2>&1; then
+    t_fail "file on a source:user entry was accepted"
+  else
+    t_pass "file on a source:user entry rejected"
   fi
   sandbox_cleanup
 fi

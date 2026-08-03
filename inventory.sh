@@ -30,6 +30,8 @@ Commands:
   remove-app <name>                      Remove an app declaration
   add-service                            Declare a custom service (interactive wizard)
   remove-service <unit>                  Remove a service declaration (e.g. myservice.service)
+  add-cron                               Declare a cron scheduling source (wizard: user crontab / /etc/cron.d file)
+  remove-cron <name>                     Remove a cron job declaration
   add-user-dir <path>                    Declare a whole user-data folder (e.g. ~/Documents)
   remove-user-dir <path>                 Remove a user-dir declaration
   review [--drift]                       Suggest apps found on this system, not yet declared;
@@ -166,6 +168,30 @@ cmd_list() {
       if systemctl is-enabled "$unit" >/dev/null 2>&1; then echo "    [x] $unit ($tags)"; else echo "    [ ] $unit ($tags)"; fi
     fi
   done < <(yq -r '.services[] | [.unit, (.target // "system"), (.enable // false | tostring), (.start // false | tostring)] | @tsv' "$INVENTORY_READ")
+
+  echo "=== Cron jobs ==="
+  while IFS=$'\t' read -r cname csource cfile; do
+    [ -n "$cname" ] || continue
+    [ -n "$cfile" ] || cfile="$cname"
+    local ctags="$csource"
+    case "$csource" in
+      user)
+        if command -v crontab >/dev/null 2>&1 && crontab -l >/dev/null 2>&1; then
+          echo "    [x] $cname ($ctags)"
+        else
+          echo "    [ ] $cname ($ctags — no crontab)"
+        fi
+        ;;
+      cron.d)
+        ctags="$ctags  file=$cfile"
+        if [ -f "$CRON_D_DIR/$cfile" ]; then
+          echo "    [x] $cname ($ctags)"
+        else
+          echo "    [ ] $cname ($ctags)"
+        fi
+        ;;
+    esac
+  done < <(yq -r '.cron_jobs[]? | [.name, .source, (.file // "")] | @tsv' "$INVENTORY_READ")
 }
 
 # --- add-package / remove-package -----------------------------------------
@@ -566,6 +592,76 @@ cmd_remove_service() {
   ok "Removed service '$unit'."
 }
 
+# --- add-cron / remove-cron -----------------------------------------------
+# write_cron NAME SOURCE [FILE] — append a cron_jobs entry (schema v6). The
+# CONTENT lives in the backup; the inventory only declares WHICH cron source.
+write_cron() {
+  local name="$1" source="$2" file="${3:-}"
+  # Temp file must live next to the repo (NOT /tmp): the snap-packaged yq
+  # cannot read /tmp, and load() would fail with 'no such file or directory'.
+  local tmp
+  tmp="$(mktemp "$REPO_ROOT/.cron-entry.XXXXXX")"
+  {
+    printf -- '- name: "%s"\n' "$(esc "$name")"
+    printf '  source: %s\n' "$source"
+    [ -n "$file" ] && printf '  file: "%s"\n' "$(esc "$file")"
+  } > "$tmp"
+  yq -i '.cron_jobs += load("'"$tmp"'")' "$INVENTORY_FILE"
+  rm -f "$tmp"
+}
+
+cmd_add_cron() {
+  echo "Declare a cron scheduling source (schema v6). The CONTENT lives in the backup —"
+  echo "the inventory only declares WHICH sources to manage (never hardcode job lines)."
+  echo
+  echo "Source:"
+  echo "  1) user    — the current user's crontab (crontab -l). At most ONE user entry."
+  echo "  2) cron.d  — one file under /etc/cron.d (restored with sudo)."
+  printf 'Select [1-2]: '
+  local sel="" source="" name="" file=""
+  read -r sel
+  if [ "$sel" = "2" ]; then
+    source="cron.d"
+  else
+    source="user"
+  fi
+  printf 'Identifier (e.g. user-crontab, my-daily): '
+  read -r name
+  name="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9._-')"
+  [ -n "$name" ] || die "Invalid identifier."
+  if yaml_list '.cron_jobs[]? | .name' | grep -Fqx "$name"; then
+    die "Cron job '$name' is already in the inventory."
+  fi
+  if [ "$source" = "cron.d" ]; then
+    printf 'File name under /etc/cron.d (blank = %s; NO dots — Debian cron ignores dotted names): ' "$name"
+    read -r file
+    [ -n "$file" ] || file="$name"
+    if ! [[ "$file" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+      die "Invalid cron.d file name: '$file'. Must be [a-zA-Z0-9_-]+ (no dots, no slashes)."
+    fi
+    [ -f "$CRON_D_DIR/$file" ] || warn "$CRON_D_DIR/$file does not exist yet — declared anyway (it will be captured once it exists)."
+  else
+    if yaml_list '.cron_jobs[]? | .source' | grep -Fqx "user"; then
+      die "A source: user cron job already exists — the running user has a single crontab (remove it first)."
+    fi
+    command -v crontab >/dev/null 2>&1 && crontab -l >/dev/null 2>&1 \
+      || warn "No crontab for $USER yet — declared anyway (it will be captured once one exists)."
+  fi
+  write_cron "$name" "$source" "$file"
+  ok "Added cron job '$name' (source=$source${file:+ file=$file})."
+}
+
+cmd_remove_cron() {
+  local name="${1:-}"
+  [ -n "$name" ] || die "Usage: ./inventory.sh remove-cron <name>"
+  if ! yaml_list '.cron_jobs[]? | .name' | grep -Fqx "$name"; then
+    warn "Cron job '$name' is not in the inventory."
+    return 0
+  fi
+  N="$name" yq -i '.cron_jobs |= map(select(.name != strenv(N)))' "$INVENTORY_FILE"
+  ok "Removed cron job '$name'."
+}
+
 # --- add-user-dir / remove-user-dir --------------------------------------
 _norm_dir() {
   local p="$1"
@@ -778,7 +874,40 @@ cmd_review() {
     echo "  (none — all detected config dirs appear declared)"
   fi
   echo
-  echo "Declare any of these with: ./inventory.sh add-app <name>"
+  echo "Cron jobs found on this system that are NOT declared:"
+  local found_cron=0 cdfile cbase
+  # Here-strings, never `yq | grep -q` (pipefail + early-exit grep SIGPIPEs a
+  # slow yq — same convention as lib/common.sh).
+  local declared_cron_sources declared_cron_files
+  declared_cron_sources="$(yq -r '.cron_jobs[]? | .source' "$INVENTORY_FILE")"
+  declared_cron_files="$(yq -r '.cron_jobs[]? | select(.source == "cron.d") | .file // .name' "$INVENTORY_FILE")"
+  if command -v crontab >/dev/null 2>&1 && crontab -l >/dev/null 2>&1; then
+    if ! grep -Fqx "user" <<< "$declared_cron_sources"; then
+      found_cron=1
+      printf '  [cron] user crontab exists (crontab -l) — declare with: ./inventory.sh add-cron\n'
+    fi
+  fi
+  # System-managed / package-owned files are never suggested (principle 4: only
+  # what the user added on top of stock Ubuntu). Two filters: a hardcoded stock
+  # list for the common Ubuntu set, AND a dpkg ownership check — a file owned by
+  # any dpkg package (e.g. sysstat, docker) is recreated by reinstalling that
+  # package, so it never needs backing up. Only hand-created files (owned by no
+  # package) are worth suggesting.
+  local stock_cron_d="anacron e2scrub_all sysstat 0hourly apt-compat dpkg man-db popularity-contest update-notifier-common apport fstrim"
+  for cdfile in "$CRON_D_DIR"/*; do
+    [ -f "$cdfile" ] || continue
+    cbase="$(basename "$cdfile")"
+    echo "$stock_cron_d" | grep -Fwq "$cbase" && continue
+    command -v dpkg >/dev/null 2>&1 && dpkg -S "$cdfile" >/dev/null 2>&1 && continue
+    grep -Fqx "$cbase" <<< "$declared_cron_files" && continue
+    found_cron=1
+    printf '  [cron] %s/%s — declare with: ./inventory.sh add-cron (source cron.d)\n' "$CRON_D_DIR" "$cbase"
+  done
+  if [ "$found_cron" = "0" ]; then
+    echo "  (none — all detected cron sources appear declared)"
+  fi
+  echo
+  echo "Declare any of these with: ./inventory.sh add-app <name> / add-cron"
 }
 
 cmd_wizard() {
@@ -811,6 +940,8 @@ case "$cmd" in
   remove-app)      shift; cmd_remove_app "$@" ;;
   add-service)     shift; cmd_add_service "$@" ;;
   remove-service)  shift; cmd_remove_service "$@" ;;
+  add-cron)        shift; cmd_add_cron "$@" ;;
+  remove-cron)     shift; cmd_remove_cron "$@" ;;
   add-user-dir)    shift; cmd_add_user_dir "$@" ;;
   remove-user-dir) shift; cmd_remove_user_dir "$@" ;;
   review)          shift; cmd_review "$@" ;;

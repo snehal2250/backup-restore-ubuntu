@@ -15,10 +15,13 @@ Instead:
 
 - A single user-maintained file, `inventory/inventory.yaml`, declares which
   **applications, packages, services, dotfiles, user-data folders, groups, default shell,
-  and extensions** the user wants.
+  extensions, and cron scheduling** the user wants. Systemd TIMERS are declared as ordinary
+  `services:` entries (their unit files are backed up like any other custom unit); CRON JOBS
+  are declared in the `cron_jobs:` list (which cron sources to manage — the content lives in
+  the backup, exactly like unit files).
 - `backup.sh` captures **only the configuration** for those declared items
-  (config directories, systemd unit files, dotfiles) plus any whole **user-data
-  folders** the user declared (`user_dirs`, e.g. `~/Documents`) into a git-ignored
+  (config directories, systemd unit files, dotfiles, declared cron sources) plus any whole
+  **user-data folders** the user declared (`user_dirs`, e.g. `~/Documents`) into a git-ignored
   `backups/` folder using **transactional staging** (build in staging, validate, atomically
   swap in — the last-known-good backup is never modified in place). A failure leaves the
   previous backup intact.
@@ -106,6 +109,7 @@ your settings over it.
 | Overwriting backup in place | Previous good backup is destroyed before new one is proven |
 | `command -v` to check installed | May match wrong source or leftover binary |
 | Running services under `--packages-only` | Config hasn't been restored yet |
+| Capturing/restoring `/etc/cron.daily|hourly|weekly|monthly`, anacron, or system-managed timers (`apt-daily`, `fstrim`, `man-db`, ...) | System-managed scheduling — violates principle 4 (only inventory-declared cron sources / timer units are ever captured; `inventory.sh review` skips stock `/etc/cron.d` files) |
 
 ## 4. Repo map
 
@@ -123,7 +127,8 @@ inventory/
 lib/
   common.sh               <- shared helpers (logging, yq bootstrap, YAML getters, status
                              checkers, path safety, manifest helpers, inventory validation,
-                             concurrency protection, architecture detection)
+                             concurrency protection, architecture detection, cron_job_get,
+                             check_timer_pairing, CRON_D_DIR override)
   installers.sh           <- TYPED installer functions for the structured `installer:`
                              records (apt, snap, snap_classic, flatpak, npm_global, pipx,
                              cargo, apt_repository, deb, tarball, script) — no free-form
@@ -135,11 +140,13 @@ lib/
                              slack, onlyoffice, storage-explorer, cloudflared, ...) —
                              templates for add-app AND `catalog:` reference templates
                              (schema v5), expanded at run time by resolve_effective_inventory
-inventory.sh              <- MANUAL tool: list / add-* / remove-* / review / wizard / validate
-backup.sh                 <- captures configs + service units + dotfiles -> backups/
-                             (transactional: staging -> validate -> mirror -> atomic swap)
-restore.sh                <- fresh install + config overwrite (--dry-run/--yes/--upgrade-base/
-                             --configs-only/--packages-only/--force-incomplete/--source <snapshot>)
+inventory.sh              <- MANUAL tool: list / add-* / remove-* (incl. add-cron/remove-cron) /
+                             review / wizard / validate
+backup.sh                 <- captures configs + service units + dotfiles + cron sources ->
+                             backups/ (transactional: staging -> validate -> mirror -> atomic swap)
+restore.sh                <- fresh install + config overwrite, incl. timer units and cron jobs
+                             (--dry-run/--yes/--upgrade-base/--configs-only/--packages-only/
+                             --force-incomplete/--source <snapshot>)
 update_all_ubuntu.sh      <- updates apt/snap/flatpak/npm + inventory apps
 schedule_cron.sh          <- installs a systemd user timer (daily + after boot)
 tests/
@@ -163,11 +170,14 @@ backups/                  <- output of backup.sh (GIT-IGNORED; contains personal
 
 The file is plain YAML with top-level scalars (`schema_version`, `profile`,
 `default_shell`), flat lists (`groups`, `user_dirs`), and structured lists (`apps`,
-`services`). `schema_version` and `profile` are REQUIRED, and ALL top-level lists
-(`apt_packages`, `snap_packages`, `flatpak_apps`, `dotfiles`, `groups`, `user_dirs`,
+`services`, `cron_jobs`). `schema_version` and `profile` are REQUIRED, and ALL top-level
+lists (`apt_packages`, `snap_packages`, `flatpak_apps`, `dotfiles`, `groups`, `user_dirs`,
 `apps`, `services`) are required too (empty allowed) — the scripts read them with plain
-`yq` expressions, so a schema-valid inventory must declare every one. All are validated
-against `inventory/schema.yaml` (bump both together when the contract changes).
+`yq` expressions, so a schema-valid inventory must declare every one. EXCEPTION:
+`cron_jobs` (schema v6) is OPTIONAL — absent means none, and the scripts read it
+null-safely (`.cron_jobs[]?` / `// []`) so v3-v5 inventories stay valid during the
+transition; the shipped inventory declares it. All are validated against
+`inventory/schema.yaml` (bump both together when the contract changes).
 
 ```yaml
 schema_version: 1            # REQUIRED — must match inventory/schema.yaml
@@ -223,12 +233,21 @@ apps:                          # one entry per MAIN app
         - ~/.config/gh-extra
 
 services:                      # only CUSTOM services the user installed
-  - unit: myservice.service
+  - unit: myservice.service    # .timer/.socket/.path units are declared here too
     target: system             # system (/etc/systemd/system) or user (~/.config/systemd/user)
     enable: true
     start: true
     config_paths:              # config files the service needs
       - ~/.config/myservice
+
+cron_jobs:                     # which cron scheduling the repo manages (content in backup)
+  - name: user-crontab         # unique identifier; artifact backups/cron/<name>
+    source: user               # user = the running user's crontab (crontab -l);
+                               #   at most ONE user entry (single crontab per user)
+  - name: my-daily
+    source: cron.d             # one file under /etc/cron.d (restored with sudo)
+    file: my-daily             # NO dots allowed (Debian cron ignores dotted names);
+                               #   defaults to the entry name; never a path
 ```
 
 Rules for agents editing the inventory:
@@ -287,8 +306,19 @@ Rules for agents editing the inventory:
      `ubuntu_version:` record + the `--source` preflight warning.
 - `schema_version`/`profile` are top-level REQUIRED keys validated by the schema;
   never bump them without updating `inventory/schema.yaml` (`$id` + version) and docs.
-  The schema accepts `schema_version: 3`/`4` during the v4/v5 transitions (every change
-  is an optional addition); new inventories use 5.
+  The schema accepts `schema_version: 3`–`5` during the transitions (every change is an
+  optional addition); new inventories use 6.
+- `cron_jobs` (schema v6, OPTIONAL list — absent means none; the shipped inventory
+  declares it, and the scripts read it null-safely, so v3-v5 inventories stay valid):
+  each entry has a unique `name`,
+  a `source` (`user` = the running user's crontab — at most one such entry; `cron.d` = the
+  file `/etc/cron.d/<file>`, `file` required and dot-free), an optional `description`, and an
+  optional `on_missing` (`warn`|`fail`) completeness policy. The inventory declares WHICH
+  sources to manage; the CONTENT is captured at backup time (`crontab -l` / a copy of the
+  cron.d file) — never hardcode crontab lines or job commands. Restore replaces the whole
+  user crontab (after rollback capture — crontabs cannot be merged safely) and installs
+  cron.d files with sudo + 0644 perms. A declared `.timer` service should have its paired
+  `.service` declared too (validate_inventory warns when it is neither declared nor on disk).
 - `extensions` lists extension/model IDs (without versions). During the post-install phase
   of restore, each is installed via the app's native mechanism.
 - `default_shell` is a top-level key (not per-app). The declared shell package must itself
@@ -315,6 +345,8 @@ Rules for agents editing the inventory:
                                     # defaults are stored as a `catalog:` reference)
 ./inventory.sh add-package apt git
 ./inventory.sh add-service          # wizard (validates unit name, config paths)
+./inventory.sh add-cron              # wizard (user crontab or /etc/cron.d file)
+./inventory.sh remove-cron user-crontab
 ./inventory.sh add-user-dir ~/Documents
 ./inventory.sh list                 # see everything + installed status
 ./inventory.sh validate             # validate schema + semantics (safe, read-only)
@@ -368,7 +400,13 @@ one that does not report a restorable status, means the last completed run did n
 ```
 Restore runs in six phases (base, packages, apps, services, dotfiles, postinstall), each
 gated by `phase_enabled`/`app_selected`/`phase_canonical` in `lib/common.sh` (pure
-functions, unit-tested in `tests/test_phases.sh`). `--only`/`--skip` accept phase names
+functions, unit-tested in `tests/test_phases.sh`). The services phase also handles TIMERS
+(declared `.timer` units — a pairing reminder fires when the paired `.service` is
+undeclared) and CRON JOBS (the cron package is ensured — installed when missing, never under
+`--configs-only` — then every declared cron source is restored with rollback capture +
+journal, and ONLY THEN is the daemon activated: config-before-start, mirroring services;
+never activated under `--packages-only`/`--configs-only`, with truthful messages;
+`--plan` lists them). `--only`/`--skip` accept phase names
 AND app names: phase names gate whole phases, app names filter the apps phase; unknown
 names die. Restore validates the backup manifest (requires `ok` or `ok_with_warnings`;
 `degraded`/`failed` need `--force-incomplete`) and the
@@ -425,15 +463,16 @@ enabled/started. Restore exits nonzero if any required item failed.
   `backup_generate_checksums`/`backup_verify_integrity` (SHA256SUMS content integrity:
   generated over the staged payload by `backup.sh`, verified by `restore.sh` before any
   config restore — hostile special files, escaping symlinks, missing/corrupt files,
-  extra-file warnings), `publish_backup` (transactional swap:
+  extra-file warnings),  `publish_backup` (transactional swap:
   same-filesystem check, fail-fast renames, rollback to the previous generation, cleanup
   trap, records `PUBLISH_RESULT` — published/rolled_back/kept_unverified — so backup.sh's
   final summary reports the true outcome), `run` (dry-run aware), status checkers (`is_apt_installed`, `is_snap_installed`,
   `is_flatpak_installed`, `is_app_installed_by_source`, `is_app_installed`),
-  `with_lock`/`release_lock` (flock).
+  `cron_job_get` (cron_jobs scalar reads), `check_timer_pairing` (declared `.timer` units
+  should have their paired `.service` declared), `with_lock`/`release_lock` (flock).
   Path overrides for sandboxed tests (`REPO_ROOT`/`INVENTORY_FILE`/`BACKUPS_DIR`/`STAGE`/
-  `ARTIFACTS`/`BACKUP_LOCK`) are honored ONLY when `BRU_ALLOW_TEST_OVERRIDES=1` (exported
-  by `tests/helpers.sh`); production ignores them so a stray environment variable can never
+  `ARTIFACTS`/`BACKUP_LOCK`/`CRON_D_DIR`) are honored ONLY when `BRU_ALLOW_TEST_OVERRIDES=1`
+  (exported by `tests/helpers.sh`); production ignores them so a stray environment variable can never
   redirect `rm -rf`/the publish `mv` at arbitrary paths. Defense in depth: an overridden
   `REPO_ROOT` must itself be a `.test-tmp.*` sandbox, and every destructive path is
   containment-checked under it (`require_contained_dir`). App installs go through the TYPED installer
@@ -480,7 +519,12 @@ enabled/started. Restore exits nonzero if any required item failed.
   add-app`, and the `catalog:` reference templates (schema v5) expanded at run time by
   `resolve_effective_inventory`.
 - **Custom service** — a systemd unit the user installed themselves; only these are ever
-  declared in the inventory.
+  declared in the inventory. Timer units (`.timer`) are custom services too, declared the
+  same way; their paired `.service` should be declared alongside them.
+- **Cron job** — a `cron_jobs:` declaration of WHICH cron scheduling the repo manages
+  (`source: user` = the running user's crontab, `source: cron.d` = one `/etc/cron.d` file).
+  The content lives in the backup under `backups/cron/<name>`; restore replaces the whole
+  user crontab (rollback-captured) or installs the cron.d file with sudo.
 - **Manifest** — `backup-info.txt` written by `backup.sh` on completion with artifact
   status, inventory SHA-256, and overall `status: ok` / `ok_with_warnings` / `degraded` /
   `failed`. The `in_progress` marker lives only in the staging manifest during a run.

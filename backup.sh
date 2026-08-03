@@ -54,7 +54,7 @@ require_contained_dir BACKUPS_DIR "$BACKUPS_DIR" "$REPO_ROOT" || die "Unsafe BAC
 
 # Clean up any stale staging from a previous run that crashed.
 rm -rf "$STAGE" "$ARTIFACTS"
-mkdir -p "$STAGE"/{apps,services,dotfiles,user-dirs}
+mkdir -p "$STAGE"/{apps,services,dotfiles,user-dirs,cron}
 > "$ARTIFACTS"  # tracked artifact file: one line per declared item
 
 manifest_in_progress "$BACKUP_RUN_ID"
@@ -209,6 +209,62 @@ while IFS=$'\t' read -r unit target; do
     record_artifact "services/$unit" "incomplete"
   fi
 done < <(yq -r '.services[] | [.unit, (.target // "system")] | @tsv' "$INVENTORY_READ")
+
+# --- Cron jobs: capture declared crontab / /etc/cron.d files ---------------
+# Schema v6: `cron_jobs:` declares WHICH cron sources the repo manages
+# (source: user = the running user's crontab via crontab -l; source: cron.d =
+# the file $CRON_D_DIR/<file>). The CONTENT is captured here, exactly like
+# unit files — the inventory never hardcodes crontab lines.
+while IFS=$'\t' read -r name source file; do
+  [ -n "$name" ] || continue
+  [ -n "$file" ] || file="$name"
+  cdest="$STAGE/cron/$name"
+  _cron_ok=1
+  _cron_has_content=0
+  # Backup-completeness policy (schema v6), same semantics as apps/services:
+  # `on_missing: fail` turns a missing cron source into a 'failed' artifact.
+  _cron_strict="no"
+  [ "$(cron_job_get "$name" '.on_missing // "warn"')" = "fail" ] && _cron_strict="yes"
+
+  case "$source" in
+    user)
+      if [ "$DRY_RUN" != "1" ] && crontab -l > "$cdest" 2>/dev/null; then
+        if [ -s "$cdest" ]; then
+          _cron_has_content=1
+          ok "  $name: user crontab captured -> backups/cron/$name"
+        else
+          ok "  $name: user crontab is EMPTY (nothing scheduled) — recorded as empty"
+        fi
+      else
+        warn "  $name: no crontab for $USER — will not be restorable."
+        _cron_ok=0
+      fi
+      ;;
+    cron.d)
+      src="$CRON_D_DIR/$file"
+      if [ -f "$src" ] && [ -r "$src" ]; then
+        if [ "$DRY_RUN" != "1" ]; then
+          cp "$src" "$cdest"
+        fi
+        _cron_has_content=1
+        ok "  $name: $src -> backups/cron/$name"
+      else
+        warn "  $name: cron file not found at $src — will not be restorable."
+        _cron_ok=0
+      fi
+      ;;
+  esac
+
+  if [ "$_cron_ok" = "1" ] && [ "$_cron_has_content" = "1" ]; then
+    record_artifact "cron/$name" "captured"
+  elif [ "$_cron_ok" = "1" ]; then
+    record_artifact "cron/$name" "empty"
+  elif [ "$_cron_strict" = "yes" ]; then
+    record_artifact "cron/$name" "failed"
+  else
+    record_artifact "cron/$name" "missing"
+  fi
+done < <(yq -r '.cron_jobs[]? | [.name, .source, (.file // "")] | @tsv' "$INVENTORY_READ")
 
 # --- Dotfiles --------------------------------------------------------------
 while IFS= read -r df; do

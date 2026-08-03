@@ -248,6 +248,22 @@ if [ "$PLAN" = "1" ]; then
       printf '  [ ] %-12s skipped\n' "$_p"
     fi
   done
+  # Cron jobs are restored inside the services phase — show them so the plan
+  # does not silently hide scheduled jobs. (No `local` here — this block is
+  # top-level; plain variables, unset after.)
+  _cron_plan="$(yq -r '.cron_jobs[]? | [.name, .source] | @tsv' "$INVENTORY_READ" 2>/dev/null || true)"
+  if [ -n "$_cron_plan" ]; then
+    echo "  cron jobs (restored in the services phase):"
+    while IFS=$'\t' read -r _cn _cs; do
+      [ -n "$_cn" ] || continue
+      if phase_enabled services; then
+        printf '    [x] %-20s source=%s\n' "$_cn" "$_cs"
+      else
+        printf '    [ ] %-20s source=%s (services phase skipped)\n' "$_cn" "$_cs"
+      fi
+    done <<< "$_cron_plan"
+  fi
+  unset _cron_plan _cn _cs
   if [ "${#APPS_ONLY[@]}" -gt 0 ]; then
     printf '  apps: %s only\n' "${APPS_ONLY[*]}"
   elif [ "${#APPS_SKIP[@]}" -gt 0 ]; then
@@ -635,6 +651,13 @@ restore_services() {
           [ "$start" = "true" ] && run sudo systemctl start "$unit"
         fi
       fi
+      # Timer units: remind that the paired .service must exist for the timer
+      # to fire on a fresh system (mirrors the validate_inventory pairing hint).
+      # Here-string, never `yq | grep -q` (pipefail + early-exit grep SIGPIPEs
+      # a slow yq — see common.sh for the same convention).
+      if [[ "$unit" == *.timer ]] && ! grep -Fqx "${unit%.timer}.service" <<< "$(yq -r '.services[] | .unit' "$INVENTORY_READ")"; then
+        warn "  $unit is a timer whose paired unit '${unit%.timer}.service' is not declared in the inventory — on a fresh system the timer will not fire unless that unit exists."
+      fi
       ok "  service: $unit ($target)"
     else
       warn "  service '$unit': no unit file in $BACKUP_LABEL — skipping."
@@ -645,13 +668,133 @@ restore_services() {
   done < <(yq -r '.services[] | [.unit, (.target // "system"), (.enable // false | tostring), (.start // false | tostring)] | @tsv' "$INVENTORY_READ")
 }
 
+# ensure_cron_daemon — the cron PACKAGE must exist for declared cron jobs
+# (source: user needs the crontab binary; source: cron.d needs the daemon,
+# activated AFTER config restore). The package is installed when missing
+# (skipped under --configs-only, which never installs packages). DAEMON
+# ACTIVATION is a separate step (activate_cron_daemon) run AFTER the config is
+# restored — config-before-start, mirroring how services restore config before
+# enable/start. Mode gating:
+#   * --packages-only — config has not been restored, so cron restore is
+#     skipped entirely (return 1);
+#   * --configs-only  — the crontab/cron.d files are CONFIG and are still
+#     restored (return 0), but the daemon is never activated by this script.
+# Returns 0 when cron restore can proceed, 1 when it must be skipped.
+ensure_cron_daemon() {
+  local have_cron=0
+  if is_apt_installed cron; then
+    have_cron=1
+  fi
+  if [ "$have_cron" = "0" ] && [ "$CONFIGS_ONLY" != "1" ]; then
+    info "cron package not installed — installing it (needed by declared cron jobs)."
+    run sudo apt-get install -y cron || { mark_failure "$EXIT_PREREQ_FAILED"; return 1; }
+    have_cron=1
+  fi
+  if [ "$have_cron" = "0" ]; then
+    warn "  cron is not installed (and --configs-only skips package installs) — skipping cron job restore."
+    return 1
+  fi
+  if [ "$PACKAGES_ONLY" = "1" ]; then
+    if [ "$DRY_RUN" = "1" ]; then
+      printf '[dry-run] cron daemon: NOT enabled/started (--packages-only skips config — re-run without --packages-only to activate).\n'
+    else
+      warn "  cron daemon: NOT enabled/started (--packages-only skips config — re-run without --packages-only to activate)."
+    fi
+    return 1
+  fi
+  return 0
+}
+
+# activate_cron_daemon — enable/start the cron daemon AFTER its config has been
+# restored (config-before-start, mirroring services). Under --configs-only the
+# daemon is never activated by this script: if it is already running it is left
+# untouched (truthful reporting), otherwise a message explains that a full
+# restore activates it.
+activate_cron_daemon() {
+  if [ "$CONFIGS_ONLY" = "1" ]; then
+    if systemctl is-active cron >/dev/null 2>&1; then
+      ok "  cron daemon: active (left untouched by --configs-only)"
+    elif [ "$DRY_RUN" = "1" ]; then
+      printf '[dry-run] cron daemon: NOT enabled/started (--configs-only restores config only — a full restore activates it).\n'
+    else
+      warn "  cron daemon: NOT enabled/started (--configs-only restores config only — a full restore activates it)."
+    fi
+    return 0
+  fi
+  if systemctl is-active cron >/dev/null 2>&1; then
+    ok "  cron daemon: active"
+  else
+    run sudo systemctl enable cron 2>/dev/null || true
+    run sudo systemctl start cron 2>/dev/null || warn "  could not start the cron daemon."
+  fi
+  return 0
+}
+
+# restore_cron_jobs — restore every declared cron source from the backup.
+#   * source: user   — the WHOLE user crontab is replaced after capturing the
+#     current one into the rollback bundle (crontabs cannot be merged safely;
+#     the previous content is always recoverable from the bundle + journal).
+#   * source: cron.d — the file is copied to $CRON_D_DIR/<file> with sudo after
+#     rollback capture, with 0644 perms (Debian cron ignores group/other-
+#     writable files in /etc/cron.d).
+# Runs inside the services phase; skipped under --packages-only (config). A
+# verified backup whose artifact file is missing marks a failure (exit code),
+# mirroring the services path — truthful exit codes (principle 9).
+restore_cron_jobs() {
+  local name source file src dest
+  while IFS=$'\t' read -r name source file; do
+    [ -n "$name" ] || continue
+    [ -n "$file" ] || file="$name"
+    src="$BACKUPS_DIR/cron/$name"
+    if [ "$BACKUPS_VERIFIED" != "1" ]; then
+      warn "  cron job '$name': no verified backups — skipping."
+      continue
+    fi
+    if [ ! -f "$src" ]; then
+      warn "  cron job '$name': backup artifact missing from $BACKUP_LABEL/cron — skipping."
+      mark_failure "$EXIT_CONFIGS_MISSING"
+      continue
+    fi
+    case "$source" in
+      user)
+        dest="/var/spool/cron/crontabs/$USER"
+        if rollback_capture "$src" "$dest" "cron/$name" sudo; then
+          journal_log "created" "cron/$name"
+        else
+          journal_log "replaced" "cron/$name"
+        fi
+        run crontab "$src"
+        ok "  cron: user crontab restored ($name)"
+        ;;
+      cron.d)
+        dest="$CRON_D_DIR/$file"
+        if rollback_capture "$src" "$dest" "cron/$name" sudo; then
+          journal_log "created" "cron/$name"
+        else
+          journal_log "replaced" "cron/$name"
+        fi
+        run sudo cp "$src" "$dest"
+        run sudo chmod 0644 "$dest"
+        ok "  cron: $dest restored ($name)"
+        ;;
+    esac
+  done < <(yq -r '.cron_jobs[]? | [.name, .source, (.file // "")] | @tsv' "$INVENTORY_READ")
+}
+
 if phase_enabled services; then
   journal_log "phase-start" "services"
-  info "Phase 4/6: services"
+  info "Phase 4/6: services (incl. timers & cron jobs)"
   restore_services
+  if [ "$(yq -r '(.cron_jobs // []) | length' "$INVENTORY_READ" 2>/dev/null || echo 0)" -gt 0 ]; then
+    if ensure_cron_daemon; then
+      restore_cron_jobs
+      # Config-before-start: activate the daemon only after its config is in place.
+      activate_cron_daemon
+    fi
+  fi
   journal_log "phase-done" "services"
 else
-  info "Phase 4/6: services (skipped)"
+  info "Phase 4/6: services (incl. timers & cron jobs) (skipped)"
 fi
 
 # --- Phase 5: dotfiles + user dirs -------------------------------------------

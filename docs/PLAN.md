@@ -139,14 +139,56 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   returning empty (instead of `merge`) for unknown owners.
 - ⬜ Run `shellcheck` on all updated scripts.
 
+## Phase 4 — Systemd timers & cron jobs (schema v6) (✅)
+
+- **Timers are first-class `services:` entries** (they always were — the unit-name
+  pattern accepts `.timer`; this phase formalized it): `validate_inventory` warns when a
+  declared `.timer`'s paired `.service` is neither declared nor on disk (a fresh restore
+  would install a timer that can never fire), and `restore.sh` repeats the message when it
+  enables a timer whose pair is undeclared. The inventory dogfoods the user's real timers:
+  `trading-bot-*.timer` + their paired `trading-bot-*.service` units (timers enabled/started,
+  services enable/start false — the timer pulls them in).
+- **New top-level `cron_jobs:` list (schema v6, OPTIONAL — absent means none, keeping
+  v3-v5 inventories valid; scripts read it null-safely)**: declares WHICH
+  cron scheduling the repo manages; the CONTENT lives in the backup (like unit files). Two
+  sources: `user` (the running user's crontab — `crontab -l` at backup, whole-crontab
+  replace with rollback capture at restore; at most ONE user entry) and `cron.d` (one file
+  under `/etc/cron.d`, restored with sudo + 0644 perms; names with dots are FORBIDDEN —
+  Debian cron ignores them). Per-entry `on_missing: warn|fail` completeness policy; artifact
+  statuses `captured`/`empty`/`missing`/`failed` flow through the same transactional staging
+  + manifest pipeline (principles 3, 8, 9).
+- `backup.sh` captures cron sources into `backups/cron/<name>` (`crontab -l`, or a copy of
+  `/etc/cron.d/<file>`); `restore.sh` restores them in the services phase — the cron package
+  is ensured (installed when missing, never under `--configs-only`), the sources are
+  restored with rollback capture + journal, and only THEN is the daemon activated
+  (config-before-start, mirroring services; never activated under
+  `--packages-only`/`--configs-only`, with truthful messages). The `--plan` output lists
+  cron jobs. `inventory.sh review` skips package-owned `/etc/cron.d` files via `dpkg -S`
+  (they are recreated by reinstalling their package, so they never need backing up).
+- `inventory.sh`: `add-cron` / `remove-cron` commands, a `=== Cron jobs ===` list section,
+  and review hints (undeclared user crontab + non-stock `/etc/cron.d` files).
+- Semantics: unique cron names, at most one `source: user`, cron.d file pattern enforced by
+  the schema; `/etc/cron.d` source dir is `CRON_D_DIR` (test-overridable only under the
+  `BRU_ALLOW_TEST_OVERRIDES=1` opt-in, like the other path overrides).
+- Tests: `tests/test_cron.sh` (33 assertions — schema v6 variants, semantic checks,
+  sandboxed backup capture of crontab + cron.d with captured/empty/missing/failed statuses,
+  sandboxed `restore.sh --source` with mocked crontab/sudo/systemctl/rsync/dpkg + rollback
+  journal assertions, and the failed-snapshot refusal); `test_static.sh` extended for the
+  v6 transition (3-6 valid, 7 rejected) and cron_jobs schema variants.
+
 ## Commit strategy
 
 Land changes in small, reviewable commits. Never commit `backups/` (git-ignored).
+The v6 rollout landed as: schema+inventory dogfood → common.sh semantic checks → backup.sh
+cron capture → restore.sh cron restore + timer messaging → inventory.sh add/remove/list →
+tests + docs → validation.
 
-## Phase 4 — Future enhancements (⬜ backlog)
+## Phase 5 — Future enhancements (⬜ backlog)
 
 - Grow the seed catalog (`lib/catalog.sh`) as the user adopts apps.
 - Optional git-crypt or age-based encryption for committing `backups/`.
 - Optional integrity check (`restore.sh --verify`) comparing declared inventory vs system.
 - VM-based automated integration tests with mock installers.
 - Encrypted backup storage support.
+- Cron merge policy (per-entry conflict_policy for crontabs) — currently whole-crontab
+  replace with rollback capture (the safe default).

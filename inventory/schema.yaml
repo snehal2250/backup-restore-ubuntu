@@ -51,6 +51,22 @@
 # `schema_version: 4` (and 3) inventories remain valid during the transition —
 # the schema accepts 3, 4 and 5. New inventories use 5.
 #
+# v6 changes: NEW top-level `cron_jobs:` list (OPTIONAL — absent means no cron
+# jobs, so v3-v5 inventories stay valid; the shipped inventory declares it) that
+# declares which cron scheduling the repo manages. Two `source`s: `user` — the
+# current user's crontab (captured with `crontab -l` at backup, installed with
+# `crontab <file>` at restore, whole-crontab replace with rollback capture) —
+# and `cron.d` — one file under /etc/cron.d (captured by copy, restored with
+# sudo). The CONTENT lives in the backup (exactly like unit files); the
+# inventory only declares WHICH cron sources to manage (principle 3). Each
+# entry takes the same optional `on_missing` (warn|fail) backup-completeness
+# policy as apps/services. Also formalized: `.timer` units were ALREADY legal
+# `services:` entries (the unit-name pattern has always accepted them) — v6
+# adds the semantic timer-pairing check (a timer's paired `.service` should be
+# declared too) in validate_inventory. NOTE: every v6 change is an optional
+# addition, so `schema_version: 5` (and 3/4) inventories remain valid during
+# the transition — the schema accepts 3, 4, 5 and 6. New inventories use 6.
+#
 # Semantic rules that a schema cannot express — unique app/service names,
 # default_shell provided by a declared package, overlapping path ownership,
 # config nested under an excluded path, {version} URL template completeness,
@@ -58,15 +74,19 @@
 # validate_inventory() in lib/common.sh. This file is structure only.
 # =============================================================================
 $schema: "https://json-schema.org/draft/2020-12/schema"
-$id: "https://backup-restore-ubuntu.local/schema/inventory-v5"
-title: "Backup-Restore-Ubuntu inventory schema (v5)"
+$id: "https://backup-restore-ubuntu.local/schema/inventory-v6"
+title: "Backup-Restore-Ubuntu inventory schema (v6)"
 description: "Structural contract for inventory/inventory.yaml, profile: workstation."
 
 type: object
 additionalProperties: false
 # All top-level lists are REQUIRED (empty allowed): the scripts read them with
 # plain yq expressions like `.apps[]`, so a schema-valid inventory must always
-# declare them. The shipped inventory declares every one of them.
+# declare them. The shipped inventory declares every one of them. EXCEPTION:
+# `cron_jobs` (schema v6) is OPTIONAL — a v3-v5 inventory without it must stay
+# valid during the transition (every v6 change is an optional addition); the
+# scripts read it null-safely (`.cron_jobs[]?` / `// []`), so absence means
+# "no cron jobs". The shipped inventory declares it (empty allowed).
 required:
   - schema_version
   - profile
@@ -81,8 +101,8 @@ required:
 
 properties:
   schema_version:
-    enum: [3, 4, 5]
-    description: "5 is the current version; 3 and 4 are accepted during the v4/v5 transitions (every v4/v5 change is an optional, backward-compatible addition). New inventories use 5."
+    enum: [3, 4, 5, 6]
+    description: "6 is the current version; 3-5 are accepted during the v5/v6 transitions (every v5/v6 change is an optional, backward-compatible addition). New inventories use 6."
   profile:
     enum:
       - workstation
@@ -136,6 +156,11 @@ properties:
     type: array
     items:
       $ref: "#/$defs/service"
+  cron_jobs:
+    type: array
+    items:
+      $ref: "#/$defs/cronJob"
+    description: "OPTIONAL (schema v6): absent means no cron jobs (v3-v5 inventories stay valid during the transition); the shipped inventory declares it empty. Scripts read it null-safely."
 
 $defs:
   app:
@@ -560,3 +585,55 @@ $defs:
         enum: [warn, fail]
         default: warn
         description: "Per-service policy for missing parts: warn (default) degrades the backup; fail records a 'failed' artifact (same effect as required: true)."
+
+  cronJob:
+    type: object
+    additionalProperties: false
+    description: >
+      ONE cron scheduling declaration (schema v6). `source: user` manages the
+      current user's crontab (the single crontab of the running user — at most
+      ONE such entry may be declared); `source: cron.d` manages one file under
+      /etc/cron.d. The inventory declares WHICH cron sources to manage; the
+      CONTENT is captured into the backup at run time (like unit files) — never
+      hardcode crontab lines or job commands here.
+    required:
+      - name
+      - source
+    properties:
+      name:
+        type: string
+        pattern: "^[a-zA-Z0-9._-]+$"
+        description: "Unique identifier; also the artifact name under backups/cron/."
+      source:
+        enum: [user, cron.d]
+        description: "user = the running user's crontab (crontab -l); cron.d = the file /etc/cron.d/<file>."
+      file:
+        type: string
+        pattern: "^[a-zA-Z0-9_-]+$"
+        description: "For source: cron.d only — the /etc/cron.d/<file> name. Debian cron ignores names containing a dot (and '~'), so dots are FORBIDDEN here; defaults to the entry name. Never a path (no slashes)."
+      description:
+        type: string
+      on_missing:
+        enum: [warn, fail]
+        default: warn
+        description: "Backup-completeness policy, same semantics as apps/services: warn (default) records a missing cron source as 'missing' (degrades the backup); fail records a 'failed' artifact (overall status failed, restore refuses by default)."
+    allOf:
+      - if:
+          properties:
+            source:
+              const: cron.d
+          required: [source]
+        then:
+          required: [file]
+          properties:
+            file:
+              type: string
+              pattern: "^[a-zA-Z0-9_-]+$"
+      - if:
+          properties:
+            source:
+              const: user
+          required: [source]
+        then:
+          properties:
+            file: false

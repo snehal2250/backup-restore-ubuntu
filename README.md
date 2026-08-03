@@ -42,6 +42,8 @@ copying of the OS itself.
                                     # accepted defaults are stored as a `catalog:` reference
 ./inventory.sh add-package apt git
 ./inventory.sh add-service          # wizard for a custom service you installed
+                                    # (timer units like foo.timer go here too)
+./inventory.sh add-cron              # wizard: user crontab or a /etc/cron.d file
 ./inventory.sh add-user-dir ~/Documents   # declare a whole user-data folder (e.g. Documents)
 ./inventory.sh review               # suggest apps found on this system that you haven't declared
 ./inventory.sh review --drift       # report how declared apps differ from their catalog templates
@@ -88,15 +90,17 @@ Keep everything current day-to-day:
 | `./inventory.sh list` | Show declared apps/packages/services + installed status | ✅ |
 | `./inventory.sh add-app <name>` | Interactive wizard to declare an app (accepted catalog defaults are stored as a `catalog:` reference) | ✅ |
 | `./inventory.sh add-package apt\|snap\|flatpak <name>` | Add a package to a list | ✅ |
-| `./inventory.sh add-service` | Interactive wizard to declare a custom service | ✅ |
+| `./inventory.sh add-service` | Interactive wizard to declare a custom service (timer units `.timer` included) | ✅ |
+| `./inventory.sh add-cron` | Wizard: declare the user crontab or a `/etc/cron.d` file | ✅ |
+| `./inventory.sh remove-cron <name>` | Remove a cron job declaration | ✅ |
 | `./inventory.sh add-user-dir <path>` | Declare a whole user-data folder (e.g. `~/Documents`) | ✅ |
-| `./inventory.sh remove-app/-package/-service/-user-dir` | Remove a declaration | ✅ |
+| `./inventory.sh remove-app/-package/-service/-user-dir/-cron` | Remove a declaration | ✅ |
 | `./inventory.sh review` | Suggest undeclared apps found on the system | ✅ |
 | `./inventory.sh wizard` | Guided flow: scan the system, declare apps one by one | ✅ |
-| `./backup.sh` | Capture configs + service units + dotfiles + `user_dirs` → `backups/`, mirror to `BACKUP_DEST` (keep last `BACKUP_KEEP`); writes a restorable `status:` (`ok`/`ok_with_warnings`) marker in `backup-info.txt` on success | ✅ |
+| `./backup.sh` | Capture configs + service/timer units + dotfiles + `user_dirs` + cron sources → `backups/`, mirror to `BACKUP_DEST` (keep last `BACKUP_KEEP`); writes a restorable `status:` (`ok`/`ok_with_warnings`) marker in `backup-info.txt` on success | ✅ |
 | `./restore.sh` | Fresh install + config restore (config from `backups/` or `--source <snapshot>`; base OS upgrade is opt-in: `--upgrade-base`; resumable/targeted via `--plan`, `--from-phase`, `--only`, `--skip`) | ⚠️ modifies system |
 | `./update_all_ubuntu.sh` | Update apt/snap/flatpak/npm + declared apps | ⚠️ modifies system |
-| `./schedule_cron.sh` | Install a @reboot scheduled backup | ⚠️ edits crontab |
+| `./schedule_cron.sh` | Install a daily systemd **user timer** (runs 15 min after boot, random delay) that replaces the old `@reboot` cron approach; removes any legacy cron entry | ⚠️ edits systemd user units + cleans the crontab |
 
 ## Layout
 
@@ -108,9 +112,9 @@ lib/installers.sh          typed installer functions for the structured installe
 lib/schema_check.py        real structural validator (python3 + jsonschema + PyYAML)
 lib/catalog.sh             built-in knowledge of common apps (opencode, code, docker, ...) —
                            also the `catalog:` reference templates (schema v5)
-inventory.sh               the manual inventory tool (list / add-* / remove-* / validate / review [--drift] / wizard)
-backup.sh                  capture configuration -> backups/
-restore.sh                 fresh install + config overwrite
+inventory.sh               the manual inventory tool (list / add-* / remove-* incl. add-cron/remove-cron / validate / review [--drift] / wizard)
+backup.sh                  capture configuration (incl. service/timer units + cron sources) -> backups/
+restore.sh                 fresh install + config overwrite (incl. timers + cron jobs)
 update_all_ubuntu.sh       update everything
 schedule_cron.sh           scheduled backup after reboot
 backups/                   captured configuration (git-ignored)
@@ -132,8 +136,11 @@ fail-fast); backup-completeness semantics (schema v4 `required:`/`on_missing:` �
 `failed`/`degraded`/`ok_with_warnings` manifests, restore refusal) against a fully
 sandboxed real `backup.sh`; catalog references (schema v5: `catalog:` + `overrides:`
 resolver merge semantics, unknown-key die, oneOf schema, sandboxed backup of a
-catalog-referenced app); and static guards (syntax, schema validation, no
-`rsync --delete` in production scripts). Sandboxes are git-ignored (`.test-tmp.*`).
+catalog-referenced app); schema v6 timers + cron (sandboxed backup of the user crontab
+and `/etc/cron.d` files with `captured`/`empty`/`missing`/`failed` statuses, sandboxed
+`restore.sh --source` of both with rollback+journal using mocked system commands,
+timer-pairing hints, cron semantic checks); and static guards (syntax, schema validation,
+no `rsync --delete` in production scripts). Sandboxes are git-ignored (`.test-tmp.*`).
 
 ## FAQ
 
@@ -222,6 +229,20 @@ user-data folders — `backup.sh` captures them in full under `backups/user-dirs
 (unit files in `/etc/systemd/system` or `~/.config/systemd/user`). Default system services
 are never touched.
 
+**Are systemd timers and cron jobs backed up?** Yes. **Timers** are declared as ordinary
+`services:` entries (`./inventory.sh add-service`, e.g. `trading-bot-telegram.timer` —
+its paired `trading-bot-telegram.service` should be declared too; `validate` reminds you
+if it isn't). `backup.sh` captures their unit files and `restore.sh` enables/starts the
+timers (the paired services stay enable/start false — the timer pulls them in). **Cron
+jobs** are declared in the new `cron_jobs:` list (`./inventory.sh add-cron`): `source: user`
+manages your crontab (`crontab -l` → `backups/cron/<name>`; restore replaces the whole
+crontab after saving the current one into the rollback bundle — crontabs can't be merged
+safely), and `source: cron.d` manages one file under `/etc/cron.d` (restored with sudo).
+The content lives in the backup; the inventory only declares *which* sources. Restore
+installs the cron package when missing, restores the cron sources (rollback-captured),
+then activates the daemon — **config-before-start, like services**. The daemon is never
+activated under `--packages-only`/`--configs-only` (with truthful messages).
+
 **My custom service needs a config file or env file.** Declare it in the service's
 `config_paths` when you run `add-service` (or put it under the relevant app's
 `config_paths`). `backup.sh` captures it; `restore.sh` puts it back after installing the
@@ -290,7 +311,7 @@ wholesale would violate the config-only principle. After a restore, do these by 
 | Project | Why it's not in the inventory | Manual restore steps |
 | --- | --- | --- |
 | `chatgpt-local-api` (`~/chatgpt-local-api`, uvicorn on `:8000`) | Your own code; 1.5 GB with `.venv` + `data/` — too large and too personal to capture as config | re-clone the repo, recreate the venv (`.venv`), copy `.env` secrets, re-copy the user unit file to `~/.config/systemd/user/chatgpt-local-api.service`, then `systemctl --user enable --now chatgpt-local-api.service` |
-| `my-trading-bot` (`~/my-trading-bot`, docker compose + `.env.compose`) | Your own code + secrets; not installable from any package source | re-clone the repo, recreate `.env.compose`, pull images (`docker compose pull`), then re-import the `trading-bot-*.service` + `trading-bot-*.timer` units (`systemctl --user enable --now trading-bot-telegram.timer` etc.) |
+| `my-trading-bot` (`~/my-trading-bot`, docker compose + `.env.compose`) | Your own code + secrets; not installable from any package source | re-clone the repo, recreate `.env.compose`, pull images (`docker compose pull`) — the `trading-bot-*.service` + `trading-bot-*.timer` units are **declared in the inventory** now, so `restore.sh` reinstalls + re-enables them automatically |
 | Tailscale node identity (`/var/lib/tailscale/tailscaled.state`) | Root-owned; `backup.sh` runs without sudo and cannot capture it | after restore, re-run `tailscale up` (the app itself is installed fresh from the official installer) |
 
 If you ever want a project captured automatically, the clean way is to declare its
