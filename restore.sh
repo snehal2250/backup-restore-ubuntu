@@ -253,6 +253,24 @@ if [ "$PLAN" = "1" ]; then
   elif [ "${#APPS_SKIP[@]}" -gt 0 ]; then
     printf '  apps: all except %s\n' "${APPS_SKIP[*]}"
   fi
+  # Resolved app records (catalog references expanded) — the EFFECTIVE values
+  # that would actually run. $INVENTORY_READ is the effective inventory (set by
+  # validate_inventory); the catalog key is read from the raw file (references
+  # are stripped by the resolver). No `local` here — this block is top-level.
+  printf '  resolved apps (effective values):\n'
+  declare -A _plan_cat=()
+  while IFS=$'\t' read -r _n _c; do
+    [ -n "$_n" ] && _plan_cat["$_n"]="$_c"
+  done < <(yq -r '.apps[] | select(has("catalog")) | [.name, .catalog] | @tsv' "$INVENTORY_FILE")
+  while IFS=$'\t' read -r _n _itype _pkg; do
+    [ -n "$_n" ] || continue
+    if app_selected "$_n"; then
+      printf '    [x] %-20s installer=%-16s %s%s\n' "$_n" "$_itype" "${_pkg:+pkg=$_pkg }" "${_plan_cat[$_n]:+(catalog: ${_plan_cat[$_n]})}"
+    else
+      printf '    [ ] %-20s (skipped by --only/--skip)\n' "$_n"
+    fi
+  done < <(yq -r '.apps[] | [.name, (.installer.type // "?"), (.installer.package // "")] | @tsv' "$INVENTORY_READ")
+  unset _plan_cat
   echo "  (every step below is a preview — nothing is modified)"
   echo
 fi
@@ -464,14 +482,14 @@ bootstrap_backends() {
       pipx) need_pipx=1 ;;
       cargo) need_cargo=1 ;;
     esac
-  done < <(yq -r '.apps[].installer.type | select(. != null)' "$INVENTORY_FILE")
+  done < <(yq -r '.apps[].installer.type | select(. != null)' "$INVENTORY_READ")
 
   if [ "$need_flatpak" = "1" ] && ! command -v flatpak >/dev/null 2>&1; then
     info "flatpak needed by declared apps — installing it."
     run sudo apt-get install -y flatpak || mark_failure
   fi
   local flatpak_count
-  flatpak_count="$(yq -r '.flatpak_apps | length // 0' "$INVENTORY_FILE" 2>/dev/null || echo 0)"
+  flatpak_count="$(yq -r '.flatpak_apps | length // 0' "$INVENTORY_READ" 2>/dev/null || echo 0)"
   if [ "$need_flatpak" = "1" ] || [ "${flatpak_count:-0}" -gt 0 ]; then
     run flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo 2>/dev/null || true
   fi
@@ -624,7 +642,7 @@ restore_services() {
         mark_failure
       fi
     fi
-  done < <(yq -r '.services[] | [.unit, (.target // "system"), (.enable // false | tostring), (.start // false | tostring)] | @tsv' "$INVENTORY_FILE")
+  done < <(yq -r '.services[] | [.unit, (.target // "system"), (.enable // false | tostring), (.start // false | tostring)] | @tsv' "$INVENTORY_READ")
 }
 
 if phase_enabled services; then

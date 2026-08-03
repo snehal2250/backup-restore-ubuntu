@@ -45,6 +45,9 @@ fi
 
 info "5/5 — Inventory apps (npm_global/pipx/cargo/script/deb/tarball)"
 if [ -f "$INVENTORY_FILE" ] && command -v yq >/dev/null 2>&1; then
+  # Expand `catalog:` references (schema v5) so the update loop sees the
+  # RESOLVED installer records. $INVENTORY_READ points at the effective file.
+  resolve_effective_inventory
   while IFS=$'\t' read -r name itype pkg; do
     [ -n "$name" ] || continue
     case "$itype" in
@@ -77,7 +80,7 @@ if [ -f "$INVENTORY_FILE" ] && command -v yq >/dev/null 2>&1; then
       *)
         _info_skip ;;
     esac
-  done < <(yq -r '.apps[] | [.name, .installer.type, (.installer.package // "")] | @tsv' "$INVENTORY_FILE" || true)
+  done < <(yq -r '.apps[] | [.name, .installer.type, (.installer.package // "")] | @tsv' "$INVENTORY_READ" || true)
 else
   warn "  Inventory not found or yq missing; skipping declared app updates."
   UPD_SKIPPED=$((UPD_SKIPPED + 1))

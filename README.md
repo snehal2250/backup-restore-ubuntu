@@ -38,11 +38,13 @@ copying of the OS itself.
 # 1. Declare what you use (your manual responsibility — this file is the source of truth)
 ./inventory.sh                      # show current inventory
 ./inventory.sh wizard               # guided: scan the system, declare apps one by one
-./inventory.sh add-app opencode     # opencode etc. are known in the built-in catalog
+./inventory.sh add-app opencode     # opencode etc. are known in the built-in catalog;
+                                    # accepted defaults are stored as a `catalog:` reference
 ./inventory.sh add-package apt git
 ./inventory.sh add-service          # wizard for a custom service you installed
 ./inventory.sh add-user-dir ~/Documents   # declare a whole user-data folder (e.g. Documents)
 ./inventory.sh review               # suggest apps found on this system that you haven't declared
+./inventory.sh review --drift       # report how declared apps differ from their catalog templates
 
 # 2. Back up the configuration of everything declared
 ./backup.sh                         # writes to backups/ AND mirrors it to BACKUP_DEST
@@ -58,7 +60,8 @@ copying of the OS itself.
 #   --source <snapshot-dir> = restore config DIRECTLY from an external backup
 #     snapshot (e.g. a backup-* mirror snapshot on the Storage disk) — no manual
 #     copying into backups/ needed. Preflight verifies the source manifest and
-#     checks architecture / Ubuntu release / inventory compatibility.
+#     checks architecture (AMD64 only) / Ubuntu release (cross-release warns) /
+#     inventory compatibility.
 #   --plan = preview which phases/apps will run (dry-run)
 #   --from-phase services = resume: skip everything before this phase
 #   --only code,git = only these apps (and any listed phases) run
@@ -83,7 +86,7 @@ Keep everything current day-to-day:
 | Command | What it does | Safe to run |
 | --- | --- | --- |
 | `./inventory.sh list` | Show declared apps/packages/services + installed status | ✅ |
-| `./inventory.sh add-app <name>` | Interactive wizard to declare an app | ✅ |
+| `./inventory.sh add-app <name>` | Interactive wizard to declare an app (accepted catalog defaults are stored as a `catalog:` reference) | ✅ |
 | `./inventory.sh add-package apt\|snap\|flatpak <name>` | Add a package to a list | ✅ |
 | `./inventory.sh add-service` | Interactive wizard to declare a custom service | ✅ |
 | `./inventory.sh add-user-dir <path>` | Declare a whole user-data folder (e.g. `~/Documents`) | ✅ |
@@ -103,8 +106,9 @@ inventory/schema.yaml      versioned JSON Schema (draft 2020-12) the inventory i
 lib/common.sh              shared helpers for all scripts
 lib/installers.sh          typed installer functions for the structured installer: records
 lib/schema_check.py        real structural validator (python3 + jsonschema + PyYAML)
-lib/catalog.sh             built-in knowledge of common apps (opencode, code, docker, ...)
-inventory.sh               the manual inventory tool (list / add-* / remove-* / validate / review / wizard)
+lib/catalog.sh             built-in knowledge of common apps (opencode, code, docker, ...) —
+                           also the `catalog:` reference templates (schema v5)
+inventory.sh               the manual inventory tool (list / add-* / remove-* / validate / review [--drift] / wizard)
 backup.sh                  capture configuration -> backups/
 restore.sh                 fresh install + config overwrite
 update_all_ubuntu.sh       update everything
@@ -126,7 +130,9 @@ path, and phase helpers; the transactional backup guarantees (interrupted-backup
 regression: staging-only `in_progress` marker, `publish_backup` success/rollback/
 fail-fast); backup-completeness semantics (schema v4 `required:`/`on_missing:` →
 `failed`/`degraded`/`ok_with_warnings` manifests, restore refusal) against a fully
-sandboxed real `backup.sh`; and static guards (syntax, schema validation, no
+sandboxed real `backup.sh`; catalog references (schema v5: `catalog:` + `overrides:`
+resolver merge semantics, unknown-key die, oneOf schema, sandboxed backup of a
+catalog-referenced app); and static guards (syntax, schema validation, no
 `rsync --delete` in production scripts). Sandboxes are git-ignored (`.test-tmp.*`).
 
 ## FAQ

@@ -120,27 +120,49 @@ else
   sandbox_cleanup
 fi
 
-t_begin "static: schema v3 inventories still validate during the v4 transition"
+t_begin "static: schema v3/v4 inventories still validate during the v5 transition"
 if ! command -v python3 >/dev/null 2>&1 || ! python3 -c 'import jsonschema, yaml' >/dev/null 2>&1; then
   echo "  SKIP: python3 + jsonschema + yaml not available"
 else
   sandbox_new
   cp "$REPO_ROOT/inventory/inventory.yaml" "$SANDBOX/inv.yaml"
-  # schema_version 3 (pre-v4) must remain valid — every v4 change is optional.
+  # schema_version 3 and 4 (pre-v5) must remain valid — every v5 change is
+  # optional (catalog references are opt-in).
   yq -i '.schema_version = 3' "$SANDBOX/inv.yaml"
   if python3 "$REPO_ROOT/lib/schema_check.py" "$REPO_ROOT/inventory/schema.yaml" "$SANDBOX/inv.yaml" >/dev/null 2>&1; then
-    t_pass "schema_version 3 accepted (v4 transition)"
+    t_pass "schema_version 3 accepted (v5 transition)"
   else
-    t_fail "schema_version 3 was rejected (v4 should accept 3 during the transition)"
+    t_fail "schema_version 3 was rejected (v5 should accept 3 during the transition)"
+  fi
+  yq -i '.schema_version = 4' "$SANDBOX/inv.yaml"
+  if python3 "$REPO_ROOT/lib/schema_check.py" "$REPO_ROOT/inventory/schema.yaml" "$SANDBOX/inv.yaml" >/dev/null 2>&1; then
+    t_pass "schema_version 4 accepted (v5 transition)"
+  else
+    t_fail "schema_version 4 was rejected (v5 should accept 4 during the transition)"
   fi
   # Unknown versions must still be rejected.
-  yq -i '.schema_version = 5' "$SANDBOX/inv.yaml"
+  yq -i '.schema_version = 6' "$SANDBOX/inv.yaml"
   if python3 "$REPO_ROOT/lib/schema_check.py" "$REPO_ROOT/inventory/schema.yaml" "$SANDBOX/inv.yaml" >/dev/null 2>&1; then
-    t_fail "schema_version 5 was accepted"
+    t_fail "schema_version 6 was accepted"
   else
-    t_pass "schema_version 5 rejected"
+    t_pass "schema_version 6 rejected"
   fi
   sandbox_cleanup
+fi
+
+t_begin "static: declared support matrix is Ubuntu + amd64 only"
+# shellcheck source=lib/common.sh
+source "$REPO_ROOT/lib/common.sh"
+assert_eq "amd64" "$SUPPORTED_ARCHS" "arch matrix is amd64-only"
+# The runtime gate (check_system_support) is HOST-dependent: on a
+# non-Ubuntu/non-amd64 machine it would (correctly) fail and break the whole
+# suite for contributors who can't run on the target platform. The constant
+# above already locks the matrix — exercise the runtime gate only when this
+# host can actually pass it.
+if [ "$ARCH_NORM" = "amd64" ] && grep -q '^ID=ubuntu$' /etc/os-release 2>/dev/null; then
+  assert_ok check_system_support   # must pass on this host (Ubuntu, amd64)
+else
+  echo "  SKIP  $CURRENT_TEST: host is not Ubuntu/amd64 (arch=$ARCH_NORM) — runtime gate not exercised here"
 fi
 
 t_summary

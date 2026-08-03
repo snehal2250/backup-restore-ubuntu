@@ -75,14 +75,20 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   ad-hoc structural parsing; plus strict semantic checks (unique names,
   `default_shell` provenance, config-path/`exclude` nesting, cross-owner path overlap
   with the explicit exclude-allowance rule, {version} template completeness,
-  supported arch/Ubuntu-release gate).
+  supported-arch gate — amd64 only; the Ubuntu release is deliberately not locked).
 - ✅ Backup completeness semantics (schema v4): per-item `required:` / `on_missing:`
   (`warn`|`fail`) on apps/services; manifest granularity `ok` / `ok_with_warnings` /
   `degraded` / `failed` with exact warning/failure counts; restore accepts
   `ok_with_warnings`, refuses `failed`, `degraded` needs `--force-incomplete`;
   `publish_backup` treats `ok_with_warnings` as verified.
+- ✅ Catalog references (schema v5): apps may be declared as `catalog: <key>` + optional
+  `overrides:` (resolved at run time by `resolve_effective_inventory` — maps/scalars
+  override the template, arrays append+dedupe; the resolved record is schema-validated);
+  `inventory.sh add-app` emits references, `list` shows resolved values + `catalog=` tag,
+  `review --drift` reports declared-vs-template drift, `restore.sh --plan` prints the
+  effective values; schema accepts `schema_version: 3|4|5`; 41-assertion `tests/test_catalog.sh`.
 - ✅ Path safety: reject `..`, control chars, containment checks.
-- ✅ Architecture detection for yq bootstrap (amd64 + arm64).
+- ✅ Architecture detection for yq bootstrap (amd64 + arm64; historical — the repo's declared matrix is now amd64-only).
 - ✅ Non-Ubuntu systems: `require_ubuntu` hard-fails (was a warning).
 - ✅ Root execution: `require_non_root` hard-fails (was silent misbehavior).
 - ✅ Source-specific install checks (`is_app_installed_by_source`).

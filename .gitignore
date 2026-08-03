@@ -13,3 +13,16 @@ backups.artifacts
 # Test sandboxes — tests/helpers.sh creates scratch dirs under the repo root
 # (the snap-packaged yq cannot read /tmp).
 .test-tmp.*
+
+# Effective (catalog-resolved) inventory written by resolve_effective_inventory
+# (lib/common.sh) when the inventory uses `catalog:` references (schema v5).
+.inventory-resolve.*
+
+# Transient scratch from inventory.sh (add-app catalog refs, review --drift)
+# and the app/service wizards — removed on success; ignore leftovers from
+# interrupted runs.
+.app-ref.*
+.app-entry.*
+.service-entry.*
+.drift-tmpl.*
+.drift-decl.*

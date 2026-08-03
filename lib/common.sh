@@ -12,6 +12,8 @@ set -euo pipefail
 
 # --- Paths ---------------------------------------------------------------
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/catalog.sh
+source "$LIB_DIR/catalog.sh"   # catalog_lookup + catalog_to_yaml (catalog refs, schema v5)
 # Test-override guard: the automated suite (tests/) runs backup.sh against a
 # fully sandboxed repo by overriding REPO_ROOT / INVENTORY_FILE /
 # INVENTORY_SCHEMA / BACKUPS_DIR / STAGE / ARTIFACTS / BACKUP_LOCK. Production
@@ -64,6 +66,19 @@ else
   BACKUPS_DIR="$REPO_ROOT/backups"
 fi
 BACKUP_MANIFEST="$BACKUPS_DIR/backup-info.txt"
+# Path every getter/script reads inventory data from. Points at the REAL
+# inventory.yaml unless a catalog reference has been resolved (schema v5):
+# resolve_effective_inventory() sets it to the effective (resolved) file.
+# inventory.sh's EDIT commands always use INVENTORY_FILE (the raw file).
+INVENTORY_READ="$INVENTORY_FILE"
+# Path of the effective (catalog-resolved) inventory; empty when the
+# inventory has no catalog references (or resolution has not run).
+EFFECTIVE_INVENTORY=""
+# Directory of THIS process's last resolved inventory (owned by us, see
+# resolve_effective_inventory); empty when none. Never shared across
+# processes — every resolve uses a pid-scoped dir so concurrent runs cannot
+# clobber each other's effective file.
+BRU_EFFECTIVE_DIR=""
 # Local-disk mirror destination for backup.sh (env-overridable; empty string disables).
 BACKUP_DEST="${BACKUP_DEST-/media/vikram-athare/Storage/backup-restore-ubuntu}"
 BACKUP_KEEP="${BACKUP_KEEP:-5}"
@@ -91,6 +106,11 @@ ok()   { printf '\033[1;32m[ OK ]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[WARN]\033[0m %s\n' "$*"; }
 err()  { printf '\033[1;31m[ERR ]\033[0m %s\n' "$*" >&2; }
 die()  { err "$*"; exit 1; }
+
+# esc: escape a string for safe inclusion inside a double-quoted YAML scalar
+# (backslashes + double quotes). Shared by inventory.sh's write_app and
+# catalog.sh's catalog_to_yaml.
+esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
 # require_safe_dir NAME PATH — defensive guard for the directories destructive
 # operations run against (staging, artifact file, live backups). Rejects
@@ -221,35 +241,41 @@ require_yq() {
 }
 
 # --- YAML access (requires yq) -------------------------------------------
+# Getter reads use "${EFFECTIVE_INVENTORY:-$INVENTORY_FILE}" — the effective
+# (catalog-resolved) file when resolve_effective_inventory ran, otherwise the
+# CURRENT $INVENTORY_FILE (evaluated at call time, so a caller that swaps
+# INVENTORY_FILE after sourcing common.sh still reads the right file — the
+# test suite does exactly that). Scripts' direct yq calls use $INVENTORY_READ,
+# which resolve_effective_inventory keeps in sync.
 yaml_get() {
   require_yq "$YQ_AUTO"
-  yq -r "$1 // \"\"" "$INVENTORY_FILE"
+  yq -r "$1 // \"\"" "${EFFECTIVE_INVENTORY:-$INVENTORY_FILE}"
 }
 
 yaml_list() {
   require_yq "$YQ_AUTO"
-  yq -r "$1" "$INVENTORY_FILE"
+  yq -r "$1" "${EFFECTIVE_INVENTORY:-$INVENTORY_FILE}"
 }
 
 # app_get NAME QUERY -> scalar attribute of one app (empty if absent)
 # Uses environment variable to avoid YAML injection.
 app_get() {
   require_yq "$YQ_AUTO"
-  N="$1" yq -r ".apps[] | select(.name == strenv(N)) | $2 // \"\"" "$INVENTORY_FILE"
+  N="$1" yq -r ".apps[] | select(.name == strenv(N)) | $2 // \"\"" "${EFFECTIVE_INVENTORY:-$INVENTORY_FILE}"
 }
 
 # installer_get NAME QUERY -> scalar attribute under .installer (empty if absent)
 # QUERY is always a fixed expression like '.type' or '.package'.
 installer_get() {
   require_yq "$YQ_AUTO"
-  N="$1" yq -r ".apps[] | select(.name == strenv(N)) | .installer$2 // \"\"" "$INVENTORY_FILE"
+  N="$1" yq -r ".apps[] | select(.name == strenv(N)) | .installer$2 // \"\"" "${EFFECTIVE_INVENTORY:-$INVENTORY_FILE}"
 }
 
 # installer_list NAME QUERY -> lines under .installer (callers pass '.packages[]?'
 # or '.components[]?' — the '?' suppresses the iterate-over-null error).
 installer_list() {
   require_yq "$YQ_AUTO"
-  N="$1" yq -r ".apps[] | select(.name == strenv(N)) | .installer$2" "$INVENTORY_FILE"
+  N="$1" yq -r ".apps[] | select(.name == strenv(N)) | .installer$2" "${EFFECTIVE_INVENTORY:-$INVENTORY_FILE}"
 }
 
 # installer_has NAME QUERY -> 0 if the .installer field is present (even if
@@ -258,7 +284,7 @@ installer_list() {
 installer_has() {
   require_yq "$YQ_AUTO"
   local name="$1" q="$2"
-  N="$name" yq -e ".apps[] | select(.name == strenv(N)) | .installer$q != null" "$INVENTORY_FILE" >/dev/null 2>&1
+  N="$name" yq -e ".apps[] | select(.name == strenv(N)) | .installer$q != null" "${EFFECTIVE_INVENTORY:-$INVENTORY_FILE}" >/dev/null 2>&1
 }
 
 # --- Safe path helpers ---------------------------------------------------
@@ -321,11 +347,16 @@ validate_path_contained() {
 #   2. SEMANTIC — rules a schema cannot express (unique names, path overlap,
 #      default_shell provenance, interactive installers, platform support...).
 
-# Supported platforms for the strict semantic platform check. Extend these
-# constants when a platform becomes supported (keep them in sync with the
-# yq bootstrap in require_yq, which knows amd64/arm64).
-SUPPORTED_ARCHS="amd64 arm64"
-SUPPORTED_UBUNTU_RELEASES="22.04 24.04"
+# Declared support matrix (2026-08-03): Ubuntu on AMD64 ONLY.
+#   * Architecture is hard-locked to amd64 — arm64 is deliberately NOT
+#     supported (no arm64 machine; headline apps like Chrome are amd64-only;
+#     arm64 support would be untested scaffolding). Change SUPPORTED_ARCHS if
+#     that ever changes.
+#   * The Ubuntu RELEASE is deliberately NOT locked: any Ubuntu release runs
+#     (version-agnostic, matching the repo's no-version-pinning principle).
+#     Cross-release restores are still flagged: the manifest records
+#     `ubuntu_version:` and restore.sh --source warns on a mismatch.
+SUPPORTED_ARCHS="amd64"
 
 # _schema_python: print the python3 interpreter that has the jsonschema + yaml
 # modules (the real validator), or fail. Tries PATH python3 first, then
@@ -364,44 +395,44 @@ require_schema_validator() {
   _schema_python >/dev/null || die "Schema validator still unavailable after the install. Run: sudo apt-get install -y python3-jsonschema python3-yaml"
 }
 
-# validate_schema_structure: run the real schema validator on the inventory.
+# validate_schema_structure [FILE]: run the real schema validator on FILE
+# (defaults to $INVENTORY_FILE — the raw inventory; callers validating the
+# resolved inventory pass the effective path explicitly).
 # Returns 0 on success, 1 on any structural violation (output is printed).
 validate_schema_structure() {
   require_schema_validator
+  local inv="${1:-$INVENTORY_FILE}"
   [ -f "$INVENTORY_SCHEMA" ] || die "Inventory schema not found: $INVENTORY_SCHEMA"
+  [ -f "$inv" ] || die "Inventory file not found: $inv"
   local py rc=0 out
   py="$(_schema_python)" || return 1
-  out="$( "$py" "$LIB_DIR/schema_check.py" "$INVENTORY_SCHEMA" "$INVENTORY_FILE" 2>&1 )" || rc=1
+  out="$( "$py" "$LIB_DIR/schema_check.py" "$INVENTORY_SCHEMA" "$inv" 2>&1 )" || rc=1
   printf '%s\n' "$out"
   return "$rc"
 }
 
-# check_system_support: strict platform gate (arch + Ubuntu release).
+# check_system_support: strict platform gate (Ubuntu OS family + amd64). The
+# Ubuntu RELEASE is intentionally NOT gated (see the SUPPORTED_ARCHS comment) —
+# only the OS family and the architecture are. Cross-release restores are
+# flagged separately via the manifest `ubuntu_version:` record + --source.
 # Note: uses here-strings, never `cmd | grep -q` — under `set -o pipefail` a
 # grep that exits on its first match SIGPIPEs a slow upstream writer (e.g. the
 # snap yq) and turns a match into a 141 "failure".
 check_system_support() {
-  local errs=0 os_id="" os_ver="" supported
+  local errs=0 os_id="" supported
   supported="$(printf '%s\n' $SUPPORTED_ARCHS)"
   if ! grep -Fqx "$ARCH_NORM" <<< "$supported"; then
-    warn "  unsupported architecture: '$ARCH_NORM' (supported: $(printf '%s' "$SUPPORTED_ARCHS" | tr ' ' '/'))"
+    warn "  unsupported architecture: '$ARCH_NORM' (this repo supports AMD64 only — see SUPPORTED_ARCHS in lib/common.sh)"
     errs=$((errs + 1))
   fi
   if [ -r /etc/os-release ]; then
     # shellcheck disable=SC1091
     . /etc/os-release
     os_id="${ID:-}"
-    os_ver="${VERSION_ID:-}"
   fi
   if [ "$os_id" != "ubuntu" ]; then
     warn "  unsupported OS: '${os_id:-unknown}' (this repo targets Ubuntu)"
     errs=$((errs + 1))
-  else
-    supported="$(printf '%s\n' $SUPPORTED_UBUNTU_RELEASES)"
-    if ! grep -Fqx "$os_ver" <<< "$supported"; then
-      warn "  unsupported Ubuntu release: '${os_ver:-unknown}' (supported: $(printf '%s' "$SUPPORTED_UBUNTU_RELEASES" | tr ' ' '/'))"
-      errs=$((errs + 1))
-    fi
   fi
   return "$(( errs > 0 ? 1 : 0 ))"
 }
@@ -513,14 +544,14 @@ check_config_overlaps() {
   while IFS=$'\t' read -r name p; do
     [ -n "$p" ] || continue
     types+=(app); owners+=("$name"); paths+=("$(_norm_overlap_path "$p")"); labels+=("app '$name'")
-  done < <(yq -r '.apps[] | . as $a | .config_paths[]? | $a.name + "\t" + .' "$INVENTORY_FILE")
+  done < <(yq -r '.apps[] | . as $a | .config_paths[]? | $a.name + "\t" + .' "${EFFECTIVE_INVENTORY:-$INVENTORY_FILE}")
   while IFS=$'\t' read -r name e; do
     [ -n "$name" ] && [ -n "$e" ] && app_excludes["$name"]+=" $e"
-  done < <(yq -r '.apps[] | . as $a | .exclude[]? | $a.name + "\t" + .' "$INVENTORY_FILE")
+  done < <(yq -r '.apps[] | . as $a | .exclude[]? | $a.name + "\t" + .' "${EFFECTIVE_INVENTORY:-$INVENTORY_FILE}")
   while IFS=$'\t' read -r unit p; do
     [ -n "$p" ] || continue
     types+=(service); owners+=("$unit"); paths+=("$(_norm_overlap_path "$p")"); labels+=("service '$unit'")
-  done < <(yq -r '.services[] | . as $s | .config_paths[]? | $s.unit + "\t" + .' "$INVENTORY_FILE")
+  done < <(yq -r '.services[] | . as $s | .config_paths[]? | $s.unit + "\t" + .' "${EFFECTIVE_INVENTORY:-$INVENTORY_FILE}")
   while IFS= read -r d; do
     [ -n "$d" ] || continue
     types+=(user_dir); owners+=(""); paths+=("$(_norm_overlap_path "$d")"); labels+=("user_dir")
@@ -565,13 +596,164 @@ check_config_overlaps() {
   return "$(( errs > 0 ? 1 : 0 ))"
 }
 
+# --- Catalog-reference resolution (schema v5) ----------------------------
+# resolve_effective_inventory: expand `catalog:` references in the RAW
+# inventory ($INVENTORY_FILE) into a fully-resolved document and point every
+# getter at it. Semantics (validated against the repo's yq):
+#   * The effective record = catalog template * overrides (yq `*` merge: maps
+#     deep-merge, scalars right-win, arrays replace wholesale — exactly right
+#     for overrides like `installer: {url: new}` which keep the rest of the
+#     template's installer).
+#   * ARRAY fields that the overrides set (config_paths, exclude, extensions,
+#     depends_apt, installer.packages, installer.components) are APPENDED to
+#     the template's list and deduped instead of replacing it — the common
+#     "add a path to the catalog's defaults" case, and the drift-reduction
+#     goal: a catalog fix reaches every referencing entry automatically.
+#     NOTE: the `| unique` below is the MIKE-FARAH-yq form, which dedupes
+#     while preserving FIRST-SEEN order (it does NOT sort like jq's unique) —
+#     so the merged array really is "template order + new override items in
+#     override order". This behavior is locked by tests/test_catalog.sh.
+#   * Non-catalog app entries pass through unchanged.
+# Dies on an unknown catalog key. No-op fast path when nothing references the
+# catalog. Sets:
+#   INVENTORY_READ       -> the effective file (or $INVENTORY_FILE)
+#   EFFECTIVE_INVENTORY  -> the effective file path (empty when no refs)
+# The effective file lives under $REPO_ROOT (.inventory-resolve.<pid>.*,
+# git-ignored) because the snap-packaged yq cannot read /tmp. Lifecycle:
+#   * Each call uses its OWN fresh pid-scoped dir. A second call in the same
+#     process removes the previous dir (tracked in BRU_EFFECTIVE_DIR) — so a
+#     caller must not keep relying on an old INVENTORY_READ path after
+#     re-resolving.
+#   * Dirs owned by OTHER live processes are NEVER removed (their pid is in
+#     the dir name and checked via kill -0), so concurrent backup.sh /
+#     restore.sh / inventory.sh list / update_all_ubuntu.sh runs cannot
+#     clobber each other's effective inventory. A run's effective dir lives
+#     for its process lifetime (the getters read it after resolve returns) and
+#     is swept — as a dead-pid dir — by the next resolution; legacy
+#     non-pid-scoped dirs are swept at the same time. Steady state is at most
+#     one leftover git-ignored dir between runs.
+_resolve_cleanup_stale() {
+  local d pid
+  for d in "$REPO_ROOT"/.inventory-resolve.*; do
+    [ -d "$d" ] || continue
+    pid="${d##*.inventory-resolve.}"
+    pid="${pid%%.*}"
+    case "$pid" in
+      "$$") : ;;   # our own dir — removed by the caller via BRU_EFFECTIVE_DIR
+      *[!0-9]*|"") rm -rf "$d" 2>/dev/null || true ;;  # legacy/unparseable -> stale garbage
+      *) if ! kill -0 "$pid" 2>/dev/null; then rm -rf "$d" 2>/dev/null || true; fi ;;
+    esac
+  done
+}
+
+resolve_effective_inventory() {
+  require_yq 0
+  local n_refs
+  n_refs="$(yq -r '[.apps[] | select(has("catalog"))] | length' "$INVENTORY_FILE" 2>/dev/null || echo 0)"
+  if [ "${n_refs:-0}" = "0" ] || [ -z "${n_refs:-}" ]; then
+    # Fast path — no refs: drop our previous dir (if any) and reset. Also
+    # sweep stale dirs from crashed runs; the pid-scoped layout makes this
+    # safe against live concurrent resolvers.
+    if [ -n "$BRU_EFFECTIVE_DIR" ]; then
+      rm -rf "$BRU_EFFECTIVE_DIR" 2>/dev/null || true
+      BRU_EFFECTIVE_DIR=""
+    fi
+    _resolve_cleanup_stale
+    INVENTORY_READ="$INVENTORY_FILE"
+    EFFECTIVE_INVENTORY=""
+    return 0
+  fi
+
+  # Clean stale dirs from crashed runs (dead pids only) and our own previous
+  # dir from an earlier resolve in this process. NEVER a blanket wipe: a live
+  # concurrent process may be reading its own effective file right now.
+  _resolve_cleanup_stale
+  if [ -n "$BRU_EFFECTIVE_DIR" ]; then
+    rm -rf "$BRU_EFFECTIVE_DIR" 2>/dev/null || true
+  fi
+  local edir tmpl ovr merged frag eff
+  edir="$(mktemp -d "$REPO_ROOT/.inventory-resolve.$$.XXXXXX")"
+  BRU_EFFECTIVE_DIR="$edir"
+  tmpl="$edir/tmpl.yml"; ovr="$edir/ovr.yml"; merged="$edir/merged.yml"
+  frag="$edir/frag.yml"; eff="$edir/effective.yml"
+
+  # The effective document starts as the raw inventory with apps: [] — every
+  # top-level scalar/list is preserved; the apps array is rebuilt below.
+  yq -n 'load("'"$INVENTORY_FILE"'") | .apps = []' > "$eff"
+
+  local name ck has_cat
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    has_cat="$(N="$name" yq -r '.apps[] | select(.name == strenv(N)) | has("catalog")' "$INVENTORY_FILE")"
+    if [ "$has_cat" != "true" ]; then
+      # Pass-through: re-emit the raw entry unchanged.
+      N="$name" yq -n 'load("'"$INVENTORY_FILE"'") | .apps[] | select(.name == strenv(N))' > "$frag"
+    else
+      ck="$(N="$name" yq -r '.apps[] | select(.name == strenv(N)) | .catalog' "$INVENTORY_FILE")"
+      [ -n "$ck" ] || die "App '$name' has an empty catalog key."
+      catalog_to_yaml "$ck" > "$tmpl" || die "App '$name' references unknown catalog key '$ck' (lib/catalog.sh)."
+      N="$name" yq -n 'load("'"$INVENTORY_FILE"'") | .apps[] | select(.name == strenv(N)) | .overrides // {}' > "$ovr"
+      yq -n 'load("'"$tmpl"'") * load("'"$ovr"'")' > "$merged"
+
+  # Array fields the overrides set: append template's + override's, dedupe
+  # (wholesale replacement would clobber the catalog's paths — the exact
+  # drift this feature exists to prevent). Note this makes `config_paths: []`
+  # in an override a no-op (the template's paths are kept) — a reference
+  # cannot CLEAR a template path; use a full record for that. The paths below
+  # are fixed literals, never derived from inventory data. The whole
+  # expression is built as a shell variable with escaped double quotes
+  # (single quotes would terminate the shell argument), then passed to yq -n.
+      local expr="load(\"$merged\")"
+      local spec key path set
+      # Path values carry no leading dot: the expression prefixes .$path.
+      for spec in \
+        "config_paths:config_paths" "exclude:exclude" "extensions:extensions" \
+        "depends_apt:depends_apt" "packages:installer.packages" \
+        "components:installer.components"; do
+        key="${spec%%:*}"; path="${spec#*:}"
+        if [ "$key" = "packages" ] || [ "$key" = "components" ]; then
+          set="$(yq -r '.installer | has("'"$key"'")' "$ovr")"
+        else
+          set="$(yq -r 'has("'"$key"'")' "$ovr")"
+        fi
+        [ "$set" = "true" ] || continue
+        # The | unique must be parenthesized INSIDE the assignment — a trailing
+        # '| unique' would pipe the whole document through unique and fail.
+        expr="$expr | .$path = (((load(\"$tmpl\").$path // []) + (load(\"$ovr\").$path // [])) | unique)"
+      done
+      N="$name" yq -n "$expr | .name = strenv(N)" > "$frag"
+    fi
+    yq -i '.apps += load("'"$frag"'")' "$eff"
+  done < <(yq -r '.apps[] | .name' "$INVENTORY_FILE")
+
+  INVENTORY_READ="$eff"
+  EFFECTIVE_INVENTORY="$eff"
+  info "Resolved $n_refs catalog reference(s) — reading effective inventory from $eff"
+  return 0
+}
+
 validate_inventory() {
   require_yq 0
   local errors=0
 
-  # 1) STRUCTURAL — versioned JSON Schema via a real validator.
-  if ! validate_schema_structure; then
+  # 0) RESOLVE catalog references (schema v5) — builds the effective inventory
+  #    (catalog templates merged with each entry's overrides) and points
+  #    INVENTORY_READ at it, so every getter and semantic check below sees the
+  #    resolved data. Dies on an unknown catalog key.
+  resolve_effective_inventory
+
+  # 1) STRUCTURAL — versioned JSON Schema via a real validator, on the RAW
+  #    inventory (catalog references are legal schema v5).
+  if ! validate_schema_structure "$INVENTORY_FILE"; then
     err "  Inventory failed schema validation (inventory/schema.yaml) — fix inventory.yaml first."
+    errors=$((errors + 1))
+  fi
+
+  # 1b) STRUCTURAL — the EFFECTIVE (resolved) inventory, when catalog refs
+  #     exist: the merged records must also satisfy the full installer schema
+  #     (e.g. an override that adds url to an apt installer is rejected here).
+  if [ -n "$EFFECTIVE_INVENTORY" ] && ! validate_schema_structure "$EFFECTIVE_INVENTORY"; then
+    err "  Resolved (catalog-expanded) inventory failed schema validation — check the overrides for the referenced apps."
     errors=$((errors + 1))
   fi
 
@@ -606,7 +788,7 @@ validate_inventory() {
     shell_bin="$(basename "$shell_path")"
     app_names="$(yaml_list '.apps[] | .name')"
     pkg_names="$(yaml_list '.apt_packages[]')"
-    apt_pkgs="$(yq -r '[.apps[] | select(.installer.type == "apt") | .installer.package // ""] + [.apps[] | select(.installer.type == "apt_repository") | .installer.packages[]?] | .[] | select(. != "")' "$INVENTORY_FILE")"
+    apt_pkgs="$(yq -r '[.apps[] | select(.installer.type == "apt") | .installer.package // ""] + [.apps[] | select(.installer.type == "apt_repository") | .installer.packages[]?] | .[] | select(. != "")' "${EFFECTIVE_INVENTORY:-$INVENTORY_FILE}")"
     if ! grep -Fqx "$shell_bin" <<< "$app_names" \
        && ! grep -Fqx "$shell_bin" <<< "$pkg_names" \
        && ! grep -Fqx "$shell_bin" <<< "$apt_pkgs"; then
@@ -1039,8 +1221,8 @@ conflict_policy_get() {
   require_yq "$YQ_AUTO"
   local kind="$1" owner="$2" val=""
   case "$kind" in
-    app)     val="$(N="$owner" yq -r ".apps[] | select(.name == strenv(N)) | .conflict_policy // \"merge\"" "$INVENTORY_FILE")" ;;
-    service) val="$(U="$owner" yq -r ".services[] | select(.unit == strenv(U)) | .conflict_policy // \"merge\"" "$INVENTORY_FILE")" ;;
+    app)     val="$(N="$owner" yq -r ".apps[] | select(.name == strenv(N)) | .conflict_policy // \"merge\"" "${EFFECTIVE_INVENTORY:-$INVENTORY_FILE}")" ;;
+    service) val="$(U="$owner" yq -r ".services[] | select(.unit == strenv(U)) | .conflict_policy // \"merge\"" "${EFFECTIVE_INVENTORY:-$INVENTORY_FILE}")" ;;
   esac
   # Unknown owners (an app/service the inventory no longer declares, or a
   # non-app/non-service kind) default to the historical safe behavior.

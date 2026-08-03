@@ -39,15 +39,27 @@
 # inventories remain valid during the transition — the schema accepts both 3
 # and 4. New inventories use 4.
 #
+# v5 changes: apps may now be declared as a CATALOG REFERENCE instead of a full
+# record — `catalog: <key>` (a template in lib/catalog.sh) plus an optional
+# `overrides:` partial record. The effective record is the catalog template
+# merged with overrides (see resolve_effective_inventory in lib/common.sh):
+# maps/scalars override the template; array fields (config_paths, exclude,
+# extensions, depends_apt, installer.packages, installer.components) APPEND to
+# the template's list (deduped). Every `apps:` item is therefore either a full
+# record (oneOf arm 1) or a reference (oneOf arm 2). Existing full records are
+# unaffected. NOTE: because every v5 change is an optional addition,
+# `schema_version: 4` (and 3) inventories remain valid during the transition —
+# the schema accepts 3, 4 and 5. New inventories use 5.
+#
 # Semantic rules that a schema cannot express — unique app/service names,
 # default_shell provided by a declared package, overlapping path ownership,
 # config nested under an excluded path, {version} URL template completeness,
-# supported arch/Ubuntu release — are enforced in validate_inventory() in
-# lib/common.sh. This file is structure only.
+# supported arch/Ubuntu release, unknown catalog keys — are enforced in
+# validate_inventory() in lib/common.sh. This file is structure only.
 # =============================================================================
 $schema: "https://json-schema.org/draft/2020-12/schema"
-$id: "https://backup-restore-ubuntu.local/schema/inventory-v4"
-title: "Backup-Restore-Ubuntu inventory schema (v4)"
+$id: "https://backup-restore-ubuntu.local/schema/inventory-v5"
+title: "Backup-Restore-Ubuntu inventory schema (v5)"
 description: "Structural contract for inventory/inventory.yaml, profile: workstation."
 
 type: object
@@ -69,8 +81,8 @@ required:
 
 properties:
   schema_version:
-    enum: [3, 4]
-    description: "4 is the current version; 3 is accepted during the v4 transition (every v4 change is an optional, backward-compatible addition). New inventories use 4."
+    enum: [3, 4, 5]
+    description: "5 is the current version; 3 and 4 are accepted during the v4/v5 transitions (every v4/v5 change is an optional, backward-compatible addition). New inventories use 5."
   profile:
     enum:
       - workstation
@@ -116,7 +128,10 @@ properties:
   apps:
     type: array
     items:
-      $ref: "#/$defs/app"
+      oneOf:
+        - $ref: "#/$defs/app"
+        - $ref: "#/$defs/appReference"
+      description: "Either a full app record (with installer) or a catalog reference (catalog: <key> + optional overrides:). A full record and a reference are mutually exclusive (an entry with both fails both arms)."
   services:
     type: array
     items:
@@ -179,16 +194,85 @@ $defs:
         default: warn
         description: "Per-app policy for missing declared config paths: warn (default) records them as incomplete and degrades the backup; fail records a 'failed' artifact (same effect as required: true). Applies ONLY to declared config_paths (see required)."
 
-  installer:
+  appReference:
     type: object
     additionalProperties: false
-    required:
-      - type
     description: >
-      Structured install record. `type` picks ONE installer function in
-      lib/installers.sh; the allowed fields depend on the type (see allOf).
-      URL fields may contain `{arch}`; deb/tarball URLs may also contain
-      `{version}` (resolved from `version` or `version_url`).
+      A CATALOG REFERENCE (schema v5). The effective app record is the catalog
+      template (lib/catalog.sh, key = `catalog`) merged with `overrides:` by
+      resolve_effective_inventory() (lib/common.sh): maps/scalars override the
+      template, array fields append to it (deduped). The RESOLVED record is
+      validated against the full app schema — an override that breaks the
+      installer contract (e.g. url on an apt installer) fails there with a
+      clear message. Mutually exclusive with the full-record form (an entry
+      with both `installer` and `catalog` matches neither oneOf arm).
+    required:
+      - name
+      - catalog
+    properties:
+      name:
+        type: string
+        pattern: "^[a-zA-Z0-9._-]+$"
+      catalog:
+        type: string
+        pattern: "^[a-zA-Z0-9._-]+$"
+        description: "Catalog template key in lib/catalog.sh (catalog_lookup). Unknown keys are rejected by the resolver."
+      overrides:
+        $ref: "#/$defs/appOverrides"
+
+  appOverrides:
+    type: object
+    additionalProperties: false
+    description: >
+      PARTIAL app record for `overrides:` — any subset of app fields. Maps and
+      scalars override the catalog template; the array fields config_paths /
+      exclude / extensions / depends_apt and the installer array fields
+      packages / components APPEND to the template's list (deduped).
+      `installer` is a partial installer record (see installerOverrides).
+    properties:
+      description:
+        type: string
+      installer:
+        $ref: "#/$defs/installerOverrides"
+      check_cmd:
+        type: string
+        pattern: "^[a-zA-Z0-9._-]+$"
+      depends_apt:
+        type: array
+        items:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9+.-]*$"
+      config_paths:
+        type: array
+        items:
+          type: string
+          pattern: "^(?!.*\\.\\.)(~|~/[^\\x00-\\x1f]*|/[^\\x00-\\x1f]*)$"
+      exclude:
+        type: array
+        items:
+          type: string
+          pattern: "^(?!.*\\.\\.)[^~/][^\\x00-\\x1f]*$"
+      extensions:
+        type: array
+        items:
+          type: string
+          pattern: "^[a-zA-Z0-9][a-zA-Z0-9._@-]*$"
+      conflict_policy:
+        enum: [merge, replace, skip-existing, prompt]
+      required:
+        type: boolean
+      on_missing:
+        enum: [warn, fail]
+
+  installerFields:
+    type: object
+    additionalProperties: false
+    description: >
+      All installer fields, shared by the full `installer:` record and the
+      partial `overrides: installer:` record (installerOverrides). The full
+      record additionally requires `type` and enforces the per-type allowed
+      keys (see installer); the partial record is unconstrained here — the
+      RESOLVED record is validated against the full installer schema instead.
     properties:
       type:
         enum: [apt, snap, snap_classic, flatpak, npm_global, pipx, cargo, apt_repository, deb, tarball, script]
@@ -259,6 +343,16 @@ $defs:
         type: string
         pattern: "^[^\\x00-\\x1f]+$"
         description: "deb/tarball: optional yq expression applied to the version_url document (e.g. .versions[0]._id)."
+
+  installer:
+    $ref: "#/$defs/installerFields"
+    required:
+      - type
+    description: >
+      Structured install record. `type` picks ONE installer function in
+      lib/installers.sh; the allowed fields depend on the type (see allOf).
+      URL fields may contain `{arch}`; deb/tarball URLs may also contain
+      `{version}` (resolved from `version` or `version_url`).
     allOf:
       # --- package-based types share one allowed-key set -------------------
       - if:
@@ -420,6 +514,17 @@ $defs:
                     unverified:
                       const: true
                   required: [unverified]
+
+  installerOverrides:
+    $ref: "#/$defs/installerFields"
+    description: >
+      PARTIAL installer record used inside an app's `overrides:` — any subset
+      of installer fields, no `type` required. Maps/scalars override the
+      catalog template; the array fields `packages`/`components` append to the
+      template's list (deduped). No per-type constraint checks here: the
+      RESOLVED record is validated against the full installer schema, so an
+      override that breaks the type's contract (e.g. adding `url` to an apt
+      installer) fails there with a clear message.
 
   service:
     type: object

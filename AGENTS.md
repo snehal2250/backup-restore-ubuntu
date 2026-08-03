@@ -132,7 +132,9 @@ lib/
                              checks inventory.yaml against inventory/schema.yaml
   catalog.sh              <- seed catalog of common apps (opencode, code, docker, chrome,
                              gh, gcloud, go, uv, tmux, terraform, ollama, az, azurite,
-                             slack, onlyoffice, storage-explorer, cloudflared, ...)
+                             slack, onlyoffice, storage-explorer, cloudflared, ...) —
+                             templates for add-app AND `catalog:` reference templates
+                             (schema v5), expanded at run time by resolve_effective_inventory
 inventory.sh              <- MANUAL tool: list / add-* / remove-* / review / wizard / validate
 backup.sh                 <- captures configs + service units + dotfiles -> backups/
                              (transactional: staging -> validate -> mirror -> atomic swap)
@@ -210,6 +212,15 @@ apps:                          # one entry per MAIN app
     on_missing: warn           # optional: warn (default) | fail — same as required: true
                                # when set to 'fail' (both apply only to DECLARED
                                # config_paths — an app with none is 'empty', never 'failed')
+    # ALTERNATIVE (schema v5): a CATALOG REFERENCE instead of a full record —
+    # `catalog: <key>` picks a template in lib/catalog.sh and `overrides:`
+    # patches it (maps/scalars override the template; config_paths/exclude/...
+    # arrays APPEND to it, deduped). `./inventory.sh add-app gh` emits this.
+  - name: gh
+    catalog: gh                 # template key in lib/catalog.sh (catalog_lookup)
+    overrides:                  # optional partial record merged over the template
+      config_paths:
+        - ~/.config/gh-extra
 
 services:                      # only CUSTOM services the user installed
   - unit: myservice.service
@@ -230,6 +241,23 @@ Rules for agents editing the inventory:
   ONE narrowly-scoped function in `lib/installers.sh`; there is NO free-form
   `install_command` anywhere. Downloads/scripts require a pinned `checksum`,
   `checksum_url`, or an explicit `unverified: true` acknowledgement.
+- `catalog:` references (schema v5, apps only): instead of a full record, an app may be
+  declared as `catalog: <key>` + an optional `overrides:` partial record. The effective
+  record is the catalog template merged with the overrides at run time by
+  `resolve_effective_inventory` (`lib/common.sh`): maps/scalars override the template,
+  array fields (config_paths/exclude/extensions/depends_apt/installer.packages/
+  installer.components) APPEND to it (deduped) — a catalog fix reaches every
+  referencing entry automatically. Because arrays append, `config_paths: []` in an
+  override is a no-op: a reference cannot CLEAR a template path (use a full record
+  when you need an empty/other path set). Every tweak belongs in `overrides:` — a
+  reference with a direct sibling field (e.g. `required: true` beside `catalog:`) fails
+  schema oneOf. A reference and a full record are mutually exclusive; unknown catalog
+  keys die in validation. `add-app` emits references when the user accepts the catalog
+  defaults; `review --drift` reports how declared entries differ from their templates;
+  `restore.sh --plan` prints the resolved (effective) values. NOTE: the backup manifest
+  records the RAW inventory sha, so a `lib/catalog.sh` template change does not bump
+  `inventory_sha256` (the effective config can differ from an old backup's) —
+  `review --drift` is the way to see that.
 - Optional `installer.package` overrides the source package name for package-based
   types (`apt`/`snap`/`snap_classic`/`flatpak`/`npm_global`/`pipx`/`cargo`) when it
   differs from the app name. It must ONLY be used with those types. Download types use
@@ -252,12 +280,15 @@ Rules for agents editing the inventory:
      or duplicated path ownership across apps/services/user_dirs (a nested path is only
      allowed when the outer app's `exclude` covers the nested component — the freebuff
      `~/.config/manicode` + `user_dirs: ~/.config/manicode/projects` split is the
-     canonical allowed case). It also hard-blocks unsupported architectures/Ubuntu
-     releases (`SUPPORTED_ARCHS`, `SUPPORTED_UBUNTU_RELEASES` in `lib/common.sh`).
+     canonical allowed case). It also hard-blocks unsupported platforms: the
+     declared support matrix is Ubuntu on AMD64 only (`SUPPORTED_ARCHS` in
+     `lib/common.sh`). The Ubuntu RELEASE is deliberately NOT locked
+     (version-agnostic) — cross-release restores are flagged by the manifest
+     `ubuntu_version:` record + the `--source` preflight warning.
 - `schema_version`/`profile` are top-level REQUIRED keys validated by the schema;
   never bump them without updating `inventory/schema.yaml` (`$id` + version) and docs.
-  The schema accepts `schema_version: 3` during the v4 transition (every v4 change is
-  an optional addition — `required`/`on_missing`); new inventories use 4.
+  The schema accepts `schema_version: 3`/`4` during the v4/v5 transitions (every change
+  is an optional addition); new inventories use 5.
 - `extensions` lists extension/model IDs (without versions). During the post-install phase
   of restore, each is installed via the app's native mechanism.
 - `default_shell` is a top-level key (not per-app). The declared shell package must itself
@@ -280,7 +311,8 @@ Rules for agents editing the inventory:
 
 **Declare an app** (the user's manual responsibility; the tool does the work):
 ```bash
-./inventory.sh add-app opencode     # wizard; catalog prefills opencode
+./inventory.sh add-app opencode     # wizard; catalog prefills opencode (accepted
+                                    # defaults are stored as a `catalog:` reference)
 ./inventory.sh add-package apt git
 ./inventory.sh add-service          # wizard (validates unit name, config paths)
 ./inventory.sh add-user-dir ~/Documents
@@ -375,7 +407,12 @@ enabled/started. Restore exits nonzero if any required item failed.
   `require_yq`, `require_non_root`, `require_ubuntu`, `yaml_get`, `yaml_list`,
   `app_get`, `installer_get`/`installer_list`/`installer_has`, `expand_path`,
   `normalize_path`, `validate_path_contained`, `require_schema_validator`,
-  `validate_schema_structure`, `validate_inventory`, `manifest_in_progress`,
+  `validate_schema_structure`, `validate_inventory`,
+  `resolve_effective_inventory` (schema v5 catalog-reference expansion: sets
+  `EFFECTIVE_INVENTORY`; getters read `${EFFECTIVE_INVENTORY:-$INVENTORY_FILE}` so a
+  caller that swaps INVENTORY_FILE after sourcing still reads the right file; scripts'
+  direct yq reads use `$INVENTORY_READ`, which the resolver keeps in sync),
+  `manifest_in_progress`,
   `manifest_final`, `manifest_verify_restorable`, `conflict_policy_get`,
   `require_safe_dir` (rejects empty// / . / .. paths for destructive targets),
   `require_contained_dir` (safe-dir + containment under REPO_ROOT, so a poisoned
@@ -439,7 +476,9 @@ enabled/started. Restore exits nonzero if any required item failed.
 - **Restore** — fresh install from recommended sources + config overwrite from `backups/`.
 - **Installer** — the typed `installer:` record on each app; `lib/installers.sh`
   dispatches it. Replaces the old opaque `install_command` shell pipelines.
-- **Catalog** — built-in knowledge in `lib/catalog.sh` used by `inventory.sh add-app`.
+- **Catalog** — built-in knowledge in `lib/catalog.sh`: templates for `inventory.sh
+  add-app`, and the `catalog:` reference templates (schema v5) expanded at run time by
+  `resolve_effective_inventory`.
 - **Custom service** — a systemd unit the user installed themselves; only these are ever
   declared in the inventory.
 - **Manifest** — `backup-info.txt` written by `backup.sh` on completion with artifact

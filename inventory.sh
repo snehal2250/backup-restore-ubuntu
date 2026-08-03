@@ -32,12 +32,13 @@ Commands:
   remove-service <unit>                  Remove a service declaration (e.g. myservice.service)
   add-user-dir <path>                    Declare a whole user-data folder (e.g. ~/Documents)
   remove-user-dir <path>                 Remove a user-dir declaration
-  review                                 Suggest apps found on this system, not yet declared
+  review [--drift]                       Suggest apps found on this system, not yet declared;
+                                         with --drift: report catalog drift (declared entries vs templates)
   wizard                                 Guided: scan the system and declare apps one by one
 EOF
 }
 
-esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+# esc() is defined in lib/common.sh (shared with catalog.sh).
 
 # --- validate ------------------------------------------------------------
 cmd_validate() {
@@ -81,6 +82,10 @@ print_plain_list() {
 
 cmd_list() {
   require_yq "$YQ_AUTO"
+  # Resolve catalog references so the listing shows the EFFECTIVE (merged)
+  # records — installer types, packages and config counts that would actually
+  # run. The raw file is still read for the catalog-key tag below.
+  resolve_effective_inventory
   echo "Inventory: $INVENTORY_FILE"
   echo
 
@@ -88,6 +93,13 @@ cmd_list() {
   app_count="$(yaml_list '.apps[] | .name' | { grep -c . 2>/dev/null || true; })"
   app_count="${app_count:-0}"
   echo "=== Apps ($app_count) ==="
+  # Catalog keys come from the RAW file (the resolver strips them from the
+  # effective document); everything else reads the effective inventory.
+  local -A _cat_of=()
+  local _cn _ck
+  while IFS=$'\t' read -r _cn _ck; do
+    [ -n "$_cn" ] && _cat_of["$_cn"]="$_ck"
+  done < <(yq -r '.apps[] | select(has("catalog")) | [.name, .catalog] | @tsv' "$INVENTORY_FILE")
   # Single yq pass to extract all app metadata — avoids repeated yq invocations
   # which have significant startup overhead (especially with snap yq).
   while IFS=$'\t' read -r name itype check pkg cfg_cnt dep_cnt; do
@@ -96,6 +108,7 @@ cmd_list() {
     [ "$pkg" = "___EMPTY___" ] && pkg=""
     local tags="  ${itype:-?}"
     [ -n "$pkg" ] && tags="$tags  pkg=$pkg"
+    [ -n "${_cat_of[$name]:-}" ] && tags="$tags  catalog=${_cat_of[$name]}"
     [ "${cfg_cnt:-0}" -gt 0 ] && tags="$tags  configs=$cfg_cnt"
     [ "${dep_cnt:-0}" -gt 0 ] && tags="$tags  deps=$dep_cnt"
     if [ "${cfg_cnt:-0}" -eq 0 ] && [ "$itype" != "snap" ] && [ "$itype" != "snap_classic" ]; then
@@ -115,7 +128,8 @@ cmd_list() {
       ((.config_paths // []) | length),
       ((.depends_apt   // []) | length)
     ] | @tsv
-  ' "$INVENTORY_FILE")
+  ' "$INVENTORY_READ")
+  unset _cat_of
   echo
 
   echo "=== Packages ==="
@@ -151,7 +165,7 @@ cmd_list() {
     else
       if systemctl is-enabled "$unit" >/dev/null 2>&1; then echo "    [x] $unit ($tags)"; else echo "    [ ] $unit ($tags)"; fi
     fi
-  done < <(yq -r '.services[] | [.unit, (.target // "system"), (.enable // false | tostring), (.start // false | tostring)] | @tsv' "$INVENTORY_FILE")
+  done < <(yq -r '.services[] | [.unit, (.target // "system"), (.enable // false | tostring), (.start // false | tostring)] | @tsv' "$INVENTORY_READ")
 }
 
 # --- add-package / remove-package -----------------------------------------
@@ -330,9 +344,16 @@ cmd_add_app() {
     [ -n "${installer_package:-}" ] && echo "  installer pkg:   ${installer_package}"
     [ -n "${config_paths:-}" ] && echo "  config_paths:    ${config_paths//$'\n'/ }"
     if confirm "Use these defaults?" "y"; then
-      write_app "$name" "${description:-}" "${check_cmd:-}" "${depends_apt:-}" \
-        "${config_paths:-}" "${exclude:-}" "${extensions:-}"
-      ok "Added app '$name'."
+      # Emit a CATALOG REFERENCE (schema v5) instead of an expanded copy: the
+      # effective record is the template merged with `overrides:` at run time,
+      # so a catalog fix reaches this entry automatically. The template key is
+      # the name the wizard looked up (catalog_lookup matches it).
+      local tmp
+      tmp="$(mktemp "$REPO_ROOT/.app-ref.XXXXXX")"
+      printf -- '- name: "%s"\n  catalog: "%s"\n' "$(esc "$name")" "$(esc "$name")" > "$tmp"
+      yq -i '.apps += load("'"$tmp"'")' "$INVENTORY_FILE"
+      rm -f "$tmp"
+      ok "Added app '$name' (catalog reference — resolved from lib/catalog.sh at run time; tweak with overrides:)."
       return 0
     fi
     desc=""; check=""; deps=""; paths=""; excl=""
@@ -381,7 +402,7 @@ cmd_add_app() {
       if [[ "${installer_url:-}" == *"{version}"* ]] && [ -z "${installer_version_url:-}" ]; then
         printf 'Version URL to resolve {version} (https://...): '; read -r installer_version_url
       fi
-      [ -n "${installer_arch:-}" ] || { printf 'Architecture gate (blank = any, or amd64/arm64): '; read -r installer_arch; }
+      [ -n "${installer_arch:-}" ] || { printf 'Architecture gate (blank = any, or amd64; arm64 artifacts are skipped on this amd64-only repo): '; read -r installer_arch; }
       printf 'sha256 checksum (blank = unverified): '; read -r installer_checksum
       [ -n "$installer_checksum" ] || installer_unverified="true"
       ;;
@@ -390,7 +411,7 @@ cmd_add_app() {
       if [[ "${installer_url:-}" == *"{version}"* ]] && [ -z "${installer_version_url:-}" ]; then
         printf 'Version URL to resolve {version} (https://...): '; read -r installer_version_url
       fi
-      [ -n "${installer_arch:-}" ] || { printf 'Architecture gate (blank = any, or amd64/arm64): '; read -r installer_arch; }
+      [ -n "${installer_arch:-}" ] || { printf 'Architecture gate (blank = any, or amd64; arm64 artifacts are skipped on this amd64-only repo): '; read -r installer_arch; }
       [ -n "${installer_binary:-}" ] || { printf 'Binary path inside the tarball to symlink into /usr/local/bin (optional): '; read -r installer_binary; }
       [ -n "${installer_dest:-}" ] || { printf 'Extract destination (blank = /usr/local): '; read -r installer_dest; }
       printf 'sha256 checksum (blank = unverified): '; read -r installer_checksum
@@ -618,8 +639,129 @@ scan_candidates() {
   done
 }
 
+cmd_review_drift() {
+  require_yq "$YQ_AUTO"
+  if ! _schema_python >/dev/null 2>&1; then
+    warn "review --drift needs python3 + python3-yaml (already required by schema validation). Run './inventory.sh validate' to install them."
+    return 1
+  fi
+  echo "Catalog drift report — declared apps vs lib/catalog.sh templates:"
+  echo
+  local found=0 name ck ovr_keys tfile dfile
+  # 1) Apps declared as catalog references: show their overrides (the
+  #    intentional deltas). These inherit catalog fixes automatically.
+  while IFS=$'\t' read -r name ck; do
+    [ -n "$name" ] || continue
+    found=1
+    ovr_keys="$(N="$name" yq -r '.apps[] | select(.name == strenv(N)) | (.overrides // {}) | keys | join(", ")' "$INVENTORY_FILE")"
+    printf '  [ref ] %-20s catalog=%-12s overrides: %s\n' "$name" "$ck" "${ovr_keys:-(none)}"
+  done < <(yq -r '.apps[] | select(has("catalog")) | [.name, .catalog] | @tsv' "$INVENTORY_FILE")
+
+  # 2) FULL records whose name is a known catalog template: they do NOT inherit
+  #    catalog fixes — classify the divergence so INTENTIONAL local extensions
+  #    (extra fields like conflict_policy, extra array items) are not shouted
+  #    at as stale drift, and only suggest converting to a reference when the
+  #    diff is actually expressible in `overrides:` (a reference can append
+  #    array items and override scalars, but it can NEVER remove a template
+  #    array item).
+  local _refs out
+  _refs="$(yq -r '.apps[] | select(has("catalog")) | .name' "$INVENTORY_FILE")"
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    if grep -Fqx "$name" <<< "$_refs"; then continue; fi
+    if ! catalog_lookup "$name" >/dev/null 2>&1; then continue; fi
+    tfile="$(mktemp "$REPO_ROOT/.drift-tmpl.XXXXXX")"
+    dfile="$(mktemp "$REPO_ROOT/.drift-decl.XXXXXX")"
+    catalog_to_yaml "$name" > "$tfile" 2>/dev/null || { rm -f "$tfile" "$dfile"; continue; }
+    N="$name" yq -n 'load("'"$INVENTORY_FILE"'") | .apps[] | select(.name == strenv(N)) | del(.name)' > "$dfile"
+    out="$(python3 - "$tfile" "$dfile" "$name" <<'PYEOF'
+import sys, yaml
+tmpl = yaml.safe_load(open(sys.argv[1])) or {}
+decl = yaml.safe_load(open(sys.argv[2])) or {}
+name = sys.argv[3]
+
+# Array fields a reference can only APPEND to (never shrink).
+APPEND = {"config_paths", "exclude", "extensions", "depends_apt"}
+APPEND_INST = {"packages", "components"}
+
+stale, missing, extra = [], [], []
+
+def array_diff(field, tarr, dval):
+    """Classify one APPEND field: tarr = template items, dval = declared value
+    (None when the key is absent). A declared value that is a STRICT SUPERSET of
+    the template's items is an addition; a subset/absent-with-items is missing
+    (not representable as a reference). Equal or both-empty stays clean — note
+    `not dval` would misflag an equal empty array (e.g. components: [] from a
+    template's `_none_`), so presence is checked with `is None`."""
+    if dval is None:
+        if tarr:
+            missing.append(field)
+        return
+    if any(x not in dval for x in tarr):
+        missing.append(field)
+        return
+    if set(dval) > set(tarr):
+        extra.append(f"{field} (+{len(set(dval) - set(tarr))})")
+
+ti = tmpl.get("installer") or {}
+di = decl.get("installer") or {}
+for k, v in ti.items():
+    if k in APPEND_INST:
+        array_diff("installer." + k, v, di.get(k))
+    elif di.get(k) != v:
+        stale.append("installer." + k)
+for k in di:
+    if k not in ti:
+        extra.append("installer." + k)
+
+for k, v in tmpl.items():
+    if k == "installer":
+        continue
+    if k in APPEND:
+        array_diff(k, v, decl.get(k))
+    elif decl.get(k) != v:
+        stale.append(k)
+for k in decl:
+    if k != "installer" and k not in tmpl:
+        extra.append(k)
+
+if not (stale or missing or extra):
+    sys.exit(0)
+lines = [f"  [man ] {name:<20} diverges from its catalog template"]
+if stale:
+    lines.append(f"         stale:  {', '.join(stale)}")
+if missing:
+    lines.append(f"         removed template items: {', '.join(missing)}")
+if extra:
+    lines.append(f"         additions: {', '.join(sorted(extra))}")
+if not missing:
+    lines.append(f"         -> expressible as a reference: ./inventory.sh remove-app {name} && ./inventory.sh add-app {name} (re-apply the stale values and additions via overrides:)")
+else:
+    lines.append("         -> keep the full record — a catalog reference cannot remove template items")
+print("\n".join(lines))
+PYEOF
+)"
+    if [ -n "$out" ]; then
+      found=1
+      printf '%s\n' "$out"
+    fi
+    rm -f "$tfile" "$dfile"
+  done < <(yq -r '.apps[] | .name' "$INVENTORY_FILE")
+
+  if [ "$found" = "0" ]; then
+    echo "  (no drift — every declared app matches its catalog template, or has no template)"
+  fi
+  echo
+  echo "References resolve to the template at run time; full records that match are fine too."
+}
+
 cmd_review() {
   require_yq "$YQ_AUTO"
+  if [ "${1:-}" = "--drift" ]; then
+    shift
+    cmd_review_drift "$@"
+    return 0
+  fi
   echo "Apps found on this system that are NOT declared in the inventory:"
   echo
   local found=0

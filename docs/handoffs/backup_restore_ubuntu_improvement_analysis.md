@@ -38,15 +38,15 @@ The highest-priority issue is that the current backup flow can overwrite the pre
 | P0 — External backup selection (`--source`) | ✅ | full preflight: `realpath` resolution, verified manifest + artifact list, arch (fail) / Ubuntu (warn) / inventory-SHA (warn), writable-source warning, nothing copied/mounted implicitly | — |
 | P1 — Structured installers | ✅ | schema v2 typed `installer:` records (11 types) dispatched by `lib/installers.sh`; no free-form `install_command` anywhere | — |
 | P1 — Strict inventory schema + semantic validation | ✅ | `inventory/schema.yaml` v3 + real validator (`lib/schema_check.py`) + semantic checks (unique names, path overlap, `{version}` templates, platform gate) | — |
-| P1 — Separate config/state/data/cache/secrets | 🚧 | `config_paths` vs `user_dirs` split + per-app `exclude:` lists cover config / user-data / cache in practice | **Per-path `class:` model + pre-backup secret scanner.** Resume: `inventory/schema.yaml` (class enum), `backup.sh` capture loop, `lib/common.sh` validation, tests |
+| P1 — Separate config/state/data/cache/secrets | ⛔ | `config_paths` vs `user_dirs` split + per-app `exclude:` lists already cover config / user-data / cache / binary for this fixed personal inventory (22 config paths, curated excludes — see the README FAQ) | — (per-path `class:` model: not-required — the same declarative-vs-manual tradeoff as the portability decision; the pre-backup secret scanner folds into the P2 "Avoid backing up auth blindly" item) |
 | P1 — Restore conflict policies | ✅ | schema v3 `conflict_policy` (merge/replace/skip-existing/prompt), rollback bundle + restore journal, dry-run creates nothing | — (three-way merge: not-required) |
 | P1 — Explicit phases + resumability | ✅ | `--plan` / `--from-phase` / `--only` / `--skip` / `--non-interactive`; durable phase journal (`phase-start`/`phase-done`); gating unit-tested | — |
 | P1 — Backup completeness semantics | ✅ | **Schema v4 `required:`/`on_missing:` on apps+services; `failed` artifacts; statuses `ok`/`ok_with_warnings`/`degraded`/`failed` with exact warning/failure counts; restore accepts `ok_with_warnings`, refuses `failed`, `degraded` needs `--force-incomplete`; `publish_backup` accepts `ok_with_warnings`; 36-assertion sandboxed `backup.sh` integration test; truthful end-of-run summary (`PUBLISH_RESULT`: a rollback is never reported as success); override sandboxing (exported `REPO_ROOT` must be `.test-tmp.*`, destructive paths containment-checked under it)** | — (restore-side per-artifact skip/report UI: not-required) |
 | P1 — Content integrity (SHA256SUMS) | ✅ | deterministic checksums on backup; restore verifies checksums, rejects hostile files + escaping symlinks, warns on extras; legacy snapshots warn | — (manifest/checksum signing: not-required) |
-| P2 — Portability | 🚧 | `SUPPORTED_ARCHS`/`SUPPORTED_UBUNTU_RELEASES` gate, `ARCH_NORM`, manifest arch/os records checked by `--source` preflight | **Per-entry compat constraints + config-format migration hooks.** Resume: `inventory/schema.yaml` (per-app arch/release gates), `lib/catalog.sh` (Chrome AMD64 gate), `lib/installers.sh`, tests |
-| P2 — Avoid backing up auth blindly | ⬜ | `exclude:` lists keep some token dirs out; docs post-restore checklist (RESTORE.md §5) | **`include:` lists + `secret` class + encrypted-secret workflow.** Resume: schema (shared with the classification item), `backup.sh`, docs |
-| P2 — Reduce catalog/inventory drift | 🔓 | — (nothing shipped; the blocker — an automated test suite — landed 2026-08-02) | **`catalog:` + `overrides:` resolution + drift-report.** Resume: `lib/catalog.sh`, `inventory.sh`, resolve effective entries in `--plan`, tests |
-| P2 — Testing strategy | ✅ | `tests/` plain-bash harness, 7 files, **202 assertions**: unit (integrity/rollback/journal/manifest/paths/phases) + interrupted-backup regression + static guards (bash -n, schema, no `rsync --delete`) | — (shellcheck + full-system VM tests tracked under the VM rehearsal item) |
+| P2 — Portability | ✅ | **Declared matrix: Ubuntu on AMD64 only** (`SUPPORTED_ARCHS="amd64"` hard-gate; arm64 not-required). Ubuntu RELEASE deliberately NOT locked (version-agnostic); cross-release restores flagged by manifest `ubuntu_version:` + `--source` warning. `ARCH_NORM`, `installer.arch` gates, catalog arch flags, `--source` arch/release checks stay | — (per-entry compat gates, config-format migration hooks, extended "record and validate" list: not-required for a single-machine tool) |
+| P2 — Avoid backing up auth blindly | ⬜ | `exclude:` lists keep some token dirs out; docs post-restore checklist (RESTORE.md §5) | **Per-path `include:` lists + pre-backup secret scanner + encrypted-secret workflow.** Resume: `inventory/schema.yaml` (per-path `include:` on `config_paths`), `backup.sh` (scanner + `--no-secrets`), docs |
+| P2 — Reduce catalog/inventory drift | ✅ | **Schema v5 `catalog:` + `overrides:` refactor shipped** — resolver (`resolve_effective_inventory`, `template * overrides`: maps/scalars override, arrays append+dedupe), effective inventory used by all getters/scripts, `add-app` emits references, `--plan` prints resolved values, `review --drift` diff (41-assertion `tests/test_catalog.sh` incl. a sandboxed real `backup.sh` with a catalog-ref app); oneOf vs full records, unknown keys die; pid-scoped resolver scratch (concurrent runs safe) | — (aliases + multiple catalog templates per app: not-required) |
+| P2 — Testing strategy | ✅ | `tests/` plain-bash harness, 9 files, **337 assertions**: unit (integrity/rollback/journal/manifest/paths/phases) + interrupted-backup regression + backup-completeness integration + catalog-reference (schema v5) integration + static guards (bash -n, schema, no `rsync --delete`, declared support matrix) | — (shellcheck + full-system VM tests tracked under the VM rehearsal item) |
 | Suggested target layout | ⛔ | not-required (flat root scripts + `lib/` works at current scale) | — |
 
 **Progress log (2026-08-02)** — shipped this session:
@@ -57,7 +57,7 @@ The highest-priority issue is that the current backup flow can overwrite the pre
 4. P1 — conflict policies + rollback bundle + restore journal, schema v3 (`3659fd8`).
 5. P2 — automated test suite (`tests/`, 7 files / 202 assertions) — **uncommitted**.
 6. P1 — resumable-phase flags + durable phase journal — **uncommitted**.
-7. P1 — backup completeness semantics (schema v4: `required:`/`on_missing:`, `ok_with_warnings`/`failed` granularity, restore gating, truthful rollback summary, override sandboxing) + test_backup_completeness.sh (8 test files / 292 assertions) — **uncommitted**.
+7. P1 — backup completeness semantics (schema v4: `required:`/`on_missing:`, `ok_with_warnings`/`failed` granularity, restore gating, truthful rollback summary, override sandboxing) + test_backup_completeness.sh (9 test files / 337 assertions, incl. the AMD64-only support-matrix lock and the schema v5 catalog-reference tests) — **uncommitted**.
 
 ### P0 — Preserve the previous known-good manifest — ✅ completed
 
@@ -216,40 +216,11 @@ Validate:
 
 Use a real YAML/schema validator rather than ad hoc parsing for structural checks.
 
-### P1 — Separate configuration, state, data, cache, and secrets — 🚧 in-progress
+### P1 — Separate configuration, state, data, cache, and secrets — ⛔ not-required (blocked)
 
-**Status:** 🚧 in-progress — the `config_paths` vs `user_dirs` split plus per-app `exclude:` lists already cover config / user-data / cache / binary in practice. Not implemented: the explicit per-path `class:` model (config/state/user_data/cache/binary/secret) and the pre-backup scanner warning about credentials/keys/sockets.
+**Status:** ⛔ not-required (2026-08-03) — decision: the existing `config_paths` vs `user_dirs` split plus curated per-app `exclude:` lists already cover config / user-data / cache / binary for this fixed personal inventory (22 config paths — see the README FAQ "Why is my backup so large?"). The per-path `class:` model (config/state/user_data/cache/binary/secret) is the same declarative-vs-manual tradeoff that closed the portability item: hand-maintained excludes are cheap at this scale, so a schema version + capture-loop rewrite buys little. Blocked rather than deferred because nothing here is genuinely broken today.
 
-**Resume here (concrete next step):** (1) add an optional `class` enum (`config|state|user_data|cache|binary|secret`, default `config`) to `config_paths` in `inventory/schema.yaml`; (2) honor `cache`/`binary`/`secret` in the `backup.sh` capture loop (skip them); (3) add a pre-backup scanner to `backup.sh` that warns on likely credential files (names/patterns: `token`, `key`, `.aws`, `.ssh`, browser profile dirs, `.docker/config.json`) without printing contents; (4) unit tests in `tests/`.
-
-The current model distinguishes application configuration and user directories, which is a good start. It needs an explicit data classification model:
-
-```yaml
-paths:
-  - path: ~/.config/example
-    class: config
-    restore: merge
-  - path: ~/.local/share/example
-    class: state
-    restore: replace
-  - path: ~/Documents
-    class: user_data
-    restore: merge
-  - path: ~/.config/example/token.json
-    class: secret
-    backup: false
-```
-
-Recommended classes:
-
-- `config`: restore after package installation
-- `state`: optional, application-specific
-- `user_data`: preserve user-created files
-- `cache`: never back up
-- `binary`: never back up
-- `secret`: excluded by default or stored through a separate encrypted workflow
-
-Add a pre-backup scanner that warns about likely credentials, private keys, browser profiles, cloud tokens, and socket files. Do not print secret contents.
+**What carries over:** the genuinely valuable half — the pre-backup secret scanner (warn on likely credentials/keys/sockets in the staged payload without printing contents) — moves to the P2 "Avoid backing up auth blindly" item, where it belongs with `include:` lists and a `--no-secrets` mode. `user_dirs` remain the explicit mechanism for whole user-data folders; `conflict_policy` already governs per-app restore semantics.
 
 ### P1 — Define restore conflict policies — ✅ completed
 
@@ -348,32 +319,19 @@ At restore time:
 - report missing and extra files
 - optionally sign the manifest/checksum file with a user-controlled key
 
-### P2 — Improve portability across Ubuntu releases and architectures — 🚧 in-progress
+### P2 — Improve portability across Ubuntu releases and architectures — ✅ closed (AMD64-only, release unlocked)
 
-**Status:** 🚧 in-progress — `SUPPORTED_ARCHS` / `SUPPORTED_UBUNTU_RELEASES` gate, arch normalisation (`ARCH_NORM`), and manifest `arch:`/`ubuntu_version:` records (now also checked by the `--source` preflight) are in place. Not implemented: per-entry compatibility constraints and config-format migration hooks.
+**Status:** ✅ closed (2026-08-03) — decision: this personal tool declares **Ubuntu on AMD64 only**. The architecture is hard-locked (`SUPPORTED_ARCHS="amd64"` in `lib/common.sh`; anything else fails `check_system_support`). The Ubuntu RELEASE is deliberately NOT locked — any Ubuntu release runs (version-agnostic, matching the repo's no-version-pinning principle); cross-release restores remain flagged by the manifest `ubuntu_version:` record + the `--source` preflight warning.
 
-**Resume here:** (1) per-entry `installer.arch:`/`installer.releases:` gates in `inventory/schema.yaml` + `lib/installers.sh` (deb/tarball URLs already template `{arch}`); (2) gate the AMD64-only Google Chrome catalog entry (`lib/catalog.sh`); (3) migration hooks for config formats that changed across releases (typed per-app actions, not free-form scripts); (4) tests in `tests/`.
+What exists and stays: `ARCH_NORM`, `{arch}` URL templating, `installer.arch` gates in `lib/installers.sh` (deb/apt_repository), catalog arch flags (Chrome `installer_arch=amd64`, `lib/catalog.sh:194,271`), and the `--source` arch (fail) / release (warn) checks.
 
-Record and validate:
-
-- Ubuntu release and codename
-- architecture
-- desktop/session type
-- source and target username
-- source home directory
-- package source compatibility
-- systemd availability
-- snap and Flatpak availability
-
-Avoid assuming that paths or package names remain identical across releases. Add per-entry compatibility constraints and migration hooks for configuration formats.
-
-The current Google Chrome installer is explicitly AMD64-specific in the catalog (`lib/catalog.sh:120-128`), so it needs architecture gating or an alternative package path.
+**Resume here:** nothing — the remaining ideas are all **not-required** for a single-machine desktop tool: per-entry `installer.releases:` compat gates (the global gate + `--source` warning cover the real risk), config-format migration hooks (covered by the RESTORE.md runbook + the cross-release warning), and the extended "record and validate" list (desktop/session type, usernames, package-source compatibility, systemd/snap/flatpak availability — over-engineering here). If arm64 support is ever wanted, re-add it by extending `SUPPORTED_ARCHS` (the yq-bootstrap arm64 branch and `installer.arch` machinery are still in place) and testing on real hardware.
 
 ### P2 — Avoid backing up application authentication blindly — ⬜ pending
 
 **Status:** ⬜ pending — per-app `include:` lists, secret classification, and an encrypted-secret workflow are not implemented. Docs carry a manual post-restore checklist (RESTORE.md § 5) and `exclude:` lists keep some token dirs out — that covers the symptom, not the policy.
 
-**Resume here (do together with the P1 classification item — same schema surface):** (1) optional `include:` globs per `config_paths` (back up only what is listed); (2) `class: secret`; (3) a `--no-secrets` backup mode or an encrypted-secret workflow; (4) extend the post-restore auth checklist (RESTORE.md §5).
+**Resume here (standalone — the P1 classification item was closed as not-required, so `include:` lists are added directly to `config_paths` entries rather than through a `class:` model):** (1) optional `include:` globs per `config_paths` (back up only what is listed); (2) the pre-backup secret scanner (warn on likely credentials without printing contents); (3) a `--no-secrets` backup mode or an encrypted-secret workflow; (4) extend the post-restore auth checklist (RESTORE.md §5).
 
 Several declared configuration directories commonly contain authentication state or tokens, such as GitHub CLI, Google Cloud, Azure, Docker, browser profiles, and Cloudflare-related configuration (`inventory/inventory.yaml:75-281`).
 
@@ -384,25 +342,9 @@ Use per-app include lists rather than copying entire configuration roots whereve
 - place required secrets in a separate encrypted backup
 - show a post-restore authentication checklist
 
-### P2 — Reduce catalog/inventory drift — ⬜ pending
+### P2 — Reduce catalog/inventory drift — ✅ completed (2026-08-03)
 
-**Status:** 🔓 unblocked — the dependency noted in the body ("after behavior is covered by tests") landed 2026-08-02: the automated test suite (`tests/`, 8 files / 292 assertions) is the safety net for this refactor. The `catalog: <name>` + `overrides:` resolution model and a drift-report command are still not implemented.
-
-**Resume here:** (1) schema: `catalog: <name>` + `overrides:` on apps (reference a catalog template instead of repeating values); (2) resolve effective entries in `inventory.sh list` and print resolved values in `restore.sh --plan`; (3) a drift-report command (`inventory.sh review --drift`) diffing inventory vs catalog defaults; (4) tests in `tests/`.
-
-The catalog contains templates while the inventory repeats full generated values. That makes future catalog fixes ineffective for existing entries.
-
-Store:
-
-```yaml
-- name: docker
-  catalog: docker
-  overrides:
-    config_paths:
-      - ~/.docker
-```
-
-Resolve the effective inventory at runtime and print it during `--plan`. Add a command to show drift between inventory entries and current catalog defaults.
+**Status:** ✅ completed — the full `catalog:` + `overrides:` refactor shipped as **schema v5**: an app may be declared as `catalog: <key>` (a `lib/catalog.sh` template) plus an optional `overrides:` partial record; `resolve_effective_inventory` (`lib/common.sh`) merges `template * overrides` at run time (maps/scalars override, arrays append+dedupe), writes the effective inventory under `.inventory-resolve.*` (git-ignored), and points every getter + script read at it. `inventory.sh add-app` now emits a reference when the catalog defaults are accepted; `inventory.sh list` shows the resolved record + a `catalog=` tag; `restore.sh --plan` prints the resolved (effective) values; `inventory.sh review --drift` canonical-diffs declared entries against their templates (references show their overrides; full records flag stale values). Schema oneOf makes full-record vs reference mutually exclusive; unknown catalog keys die in validation; the resolved document is itself schema-validated. Covered by `tests/test_catalog.sh` (41 assertions: resolver merge semantics, installer sub-map override, unknown-key die, stale-dir sweep, order-preserving array dedupe, oneOf, a sandboxed real `backup.sh` capturing a catalog-referenced app, `review --drift` stale-vs-additions classification incl. the equal-empty-array edge) + the `test_static.sh` transition checks (3/4 accepted, unknown rejected) and host-gated support-matrix test. The resolver's effective-inventory scratch is pid-scoped (`$REPO_ROOT/.inventory-resolve.<pid>.*`) and never blanket-wiped, so concurrent backup/list/restore runs cannot clobber each other's resolved file. Suite is 9 files / 337 assertions.
 
 ### P2 — Testing strategy — ✅ completed (2026-08-02)
 
@@ -514,9 +456,9 @@ backup-restore-ubuntu/
 5. ✅ done — Add restore journal, conflict policies, and resumable phases (conflict policies + rollback bundle + journal 2026-08-02; resumable-phase flags `--plan`/`--from-phase`/`--only`/`--skip`/`--non-interactive` + durable phase journal 2026-08-02).
 6. ✅ done — Introduce schema versioning and strict inventory validation.
 7. ✅ done — Replace opaque custom commands incrementally with typed installers.
-8. ⬜ pending (next-up with the classification item) — Add secret classification and encrypted-secret guidance. **Resume:** see the P2 "Avoid backing up auth blindly" item — `include:` lists + `class: secret` + encrypted workflow.
+8. ⬜ pending — Add secret classification and encrypted-secret guidance. **Resume:** see the P2 "Avoid backing up auth blindly" item — per-path `include:` lists + the pre-backup secret scanner + encrypted workflow (its former pairing with the P1 classification item is closed as not-required).
 9. 🚧 in-progress — Add VM-based end-to-end restore rehearsal (VirtualBox rehearsal reached app 16/24; full clean run still outstanding — docs/PLAN.md). **Resume:** complete a full clean rehearsal run per docs/REHEARSAL-VIRTUALBOX.md §6.7–6.8 (static guest `/etc/resolv.conf` + unlocked screen — lessons already baked in), then an idempotency re-run.
-10. 🔓 unblocked (tests landed 2026-08-02) — Refactor catalog/inventory duplication. **Resume:** see the P2 "Reduce catalog/inventory drift" item — `catalog:` + `overrides:` + drift-report, with the test suite as the safety net.
+10. ✅ done (2026-08-03) — Refactor catalog/inventory duplication: schema v5 `catalog:` + `overrides:` references, resolved at run time by `resolve_effective_inventory`; `add-app` emits references; `--plan` prints resolved values; `review --drift` reports drift. See the P2 "Reduce catalog/inventory drift" item.
 
 ## Generated Repository Evidence
 
@@ -528,4 +470,4 @@ backup-restore-ubuntu/
 - **Important source files inspected:** `backup.sh`, `restore.sh`, `lib/common.sh`, `lib/catalog.sh`, `inventory/inventory.yaml`
 - **Key finding:** the in-progress manifest is written to the live backup before staged publication, which can invalidate the previous known-good backup after interruption
 - **Gaps:** no commands or tests were executed; backup payloads were not inspected; the repository-evidence generator rejected its request, so this analysis used targeted reads
-- **Recommended next step (updated 2026-08-02):** all P0 items, P1 integrity / conflict-policies / phases / installers / schema, and the P2 test suite are shipped. Next open items, in order: **P1 backup completeness semantics** (finer `ok_with_warnings`/`failed` + per-item `required:`), then **P1 config/state/secrets classification** (which also unlocks P2 auth-blind backup), then **P2 catalog/inventory drift** (unblocked by tests). The **VM rehearsal** (item 9) continues independently — a full clean run is the remaining outstanding item.
+- **Recommended next step (updated 2026-08-03):** all P0 items, P1 integrity / conflict-policies / phases / installers / schema / completeness, the P2 test suite, and the **P2 catalog/inventory drift refactor (schema v5 `catalog:` + `overrides:`)** are shipped. **P1 config/state/secrets classification is closed as not-required** (curated per-app excludes cover it; the support matrix is now Ubuntu/amd64-only, release unlocked). The only open code item is **P2 avoid backing up auth blindly** (standalone: per-path `include:` + pre-backup secret scanner + `--no-secrets`). The **VM rehearsal** (item 9) continues independently — a full clean run is the remaining outstanding item.

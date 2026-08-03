@@ -149,10 +149,11 @@ while IFS=$'\t' read -r unit target; do
   mkdir -p "$sdest/home" "$sdest/root"
   _svc_ok=1
   _svc_has_unit=0
-  # Backup-completeness policy (schema v4), same semantics as apps.
+  # Backup-completeness policy (schema v4), same semantics as apps. Reads
+  # INVENTORY_READ (the effective inventory — set by validate_inventory).
   _svc_strict="no"
-  [ "$(unit="$unit" yq -r ".services[] | select(.unit == strenv(unit)) | .required // false" "$INVENTORY_FILE")" = "true" ] && _svc_strict="yes"
-  [ "$(unit="$unit" yq -r ".services[] | select(.unit == strenv(unit)) | .on_missing // \"warn\"" "$INVENTORY_FILE")" = "fail" ] && _svc_strict="yes"
+  [ "$(unit="$unit" yq -r ".services[] | select(.unit == strenv(unit)) | .required // false" "$INVENTORY_READ")" = "true" ] && _svc_strict="yes"
+  [ "$(unit="$unit" yq -r ".services[] | select(.unit == strenv(unit)) | .on_missing // \"warn\"" "$INVENTORY_READ")" = "fail" ] && _svc_strict="yes"
 
   if [ "$target" = "user" ]; then
     src="$HOME/.config/systemd/user/$unit"
@@ -196,7 +197,7 @@ while IFS=$'\t' read -r unit target; do
       warn "  $unit: $p -> rsync failed (partial read?); fix permissions and re-run"
       _svc_ok=0
     fi
-  done < <(unit="$unit" yq -r ".services[] | select(.unit == strenv(unit)) | .config_paths[]?" "$INVENTORY_FILE")
+  done < <(unit="$unit" yq -r ".services[] | select(.unit == strenv(unit)) | .config_paths[]?" "$INVENTORY_READ")
 
   if [ "$_svc_ok" = "1" ] && [ "$_svc_has_unit" = "1" ]; then
     record_artifact "services/$unit" "captured"
@@ -207,7 +208,7 @@ while IFS=$'\t' read -r unit target; do
   else
     record_artifact "services/$unit" "incomplete"
   fi
-done < <(yq -r '.services[] | [.unit, (.target // "system")] | @tsv' "$INVENTORY_FILE")
+done < <(yq -r '.services[] | [.unit, (.target // "system")] | @tsv' "$INVENTORY_READ")
 
 # --- Dotfiles --------------------------------------------------------------
 while IFS= read -r df; do

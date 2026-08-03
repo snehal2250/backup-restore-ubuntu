@@ -36,6 +36,15 @@
 #     {arch}/{version} templates, arch gates — see inventory/schema.yaml).
 #     `script` is the explicit LAST RESORT: it requires a pinned
 #     `installer.checksum` or `installer.unverified: true`.
+#     CATALOG REFERENCES (schema v5, optional): instead of a full record an
+#     app may be declared as `catalog: <key>` (a template in lib/catalog.sh,
+#     e.g. `./inventory.sh add-app gh` emits this) plus an optional
+#     `overrides:` partial record. The effective record is the template merged
+#     with the overrides at run time (resolve_effective_inventory in
+#     lib/common.sh): maps/scalars override the template, arrays (config_paths,
+#     exclude, ...) APPEND to it (deduped) — so catalog fixes reach existing
+#     entries automatically. `./inventory.sh review --drift` reports how
+#     declared entries differ from their templates.
 #                config_paths use '~' form and are the ONLY things backed up
 #                exclude: optional rsync exclude patterns (one per line) to keep caches,
 #                model stores and re-downloadable binaries OUT of the backup
@@ -49,7 +58,7 @@
 #   * services:  only CUSTOM services the user installed; target system|user
 # =============================================================================
 
-schema_version: 4 # must match inventory/schema.yaml (bump both together); 3 still validates during the transition
+schema_version: 5 # must match inventory/schema.yaml (bump both together); 4 and 3 still validate during the transition
 profile: workstation # machine profile, validated against the schema
 default_shell: /usr/bin/fish
 apt_packages: []
