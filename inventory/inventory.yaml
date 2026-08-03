@@ -372,6 +372,14 @@ services:
     target: system
     enable: false
     start: false
+  # Dogfood: cloudflared's daily update TIMER (same pattern as the trading-bot
+  # timers below — the timer is the enabled/started entry point; the paired
+  # cloudflared-update.service is pulled in by the timer, so it stays
+  # enable/start false).
+  - unit: "cloudflared-update.timer"
+    target: system
+    enable: true
+    start: true
   # Dogfood: the user's systemd user TIMERS (schema v6 formalized .timer units
   # as first-class services entries). The timer is the enabled/started entry
   # point; its paired .service is pulled in by the timer and must NOT be
@@ -401,7 +409,9 @@ services:
     target: user
     enable: false
     start: false
-cron_jobs: []
+cron_jobs:
+  - name: "user-crontab"
+    source: user
 # Declare WHICH cron sources the repo manages — the CONTENT lives in the backup,
 # never here (add with: ./inventory.sh add-cron):
 #   - name: user-crontab
