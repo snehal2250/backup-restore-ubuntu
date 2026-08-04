@@ -225,6 +225,24 @@ its real configuration on first start.
 user-data folders — `backup.sh` captures them in full under `backups/user-dirs/` and
 `restore.sh` puts them back wholesale.
 
+**Can I exclude files from a user data directory?** Yes (schema v7+). Instead of a
+plain string, declare a user_dir as an object with `path` and optional `exclude`:
+
+```yaml
+user_dirs:
+  - ~/Documents
+  - path: ~/.config/manicode/projects
+    exclude:
+      - "chats"          # skip large AI chat log files
+```
+
+The `exclude` patterns are passed to rsync (same glob syntax as app-level `exclude`).
+This is useful for trimming large auto-generated files (chat logs, build caches, etc.)
+from user-data directories while still capturing the rest. Legacy plain strings remain
+valid and behave identically. To add a user_dir with excludes, either edit the inventory
+manually or use `./inventory.sh add-user-dir` (plain string) and then add the `exclude`
+object form by editing `inventory.yaml`.
+
 **Which services are managed?** Only the custom services **you** declare in the inventory
 (unit files in `/etc/systemd/system` or `~/.config/systemd/user`). Default system services
 are never touched.

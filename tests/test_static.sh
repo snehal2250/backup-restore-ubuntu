@@ -146,6 +146,54 @@ else
   sandbox_cleanup
 fi
 
+t_begin "static: schema v7 accepts valid user_dirs object form, rejects invalid"
+if ! command -v yq >/dev/null 2>&1; then
+  echo "  SKIP: yq not installed — user_dirs object-form checks skipped"
+elif ! command -v python3 >/dev/null 2>&1 || ! python3 -c 'import jsonschema, yaml' >/dev/null 2>&1; then
+  echo "  SKIP: python3 + jsonschema + yaml not available"
+else
+  sandbox_new
+  cp "$REPO_ROOT/inventory/inventory.yaml" "$SANDBOX/inv.yaml"
+  # Set schema_version 7 explicitly (the shipped inventory already is v7).
+  yq -i '.schema_version = 7' "$SANDBOX/inv.yaml"
+  # Valid: object form with path + exclude must be accepted.
+  yq -i '.user_dirs = ["~/Documents", {"path": "~/.config/manicode/projects", "exclude": ["chats"]}]' "$SANDBOX/inv.yaml"
+  if python3 "$REPO_ROOT/lib/schema_check.py" "$REPO_ROOT/inventory/schema.yaml" "$SANDBOX/inv.yaml" >/dev/null 2>&1; then
+    t_pass "valid user_dirs object form with exclude accepted"
+  else
+    t_fail "valid user_dirs object form with exclude was rejected"
+  fi
+  # Valid: object form without exclude must be accepted.
+  yq -i '.user_dirs = ["~/Documents", {"path": "~/.config/manicode/projects"}]' "$SANDBOX/inv.yaml"
+  if python3 "$REPO_ROOT/lib/schema_check.py" "$REPO_ROOT/inventory/schema.yaml" "$SANDBOX/inv.yaml" >/dev/null 2>&1; then
+    t_pass "valid user_dirs object form without exclude accepted"
+  else
+    t_fail "valid user_dirs object form without exclude was rejected"
+  fi
+  # Invalid: object form without path (missing required field).
+  yq -i '.user_dirs = ["~/Documents", {"exclude": ["chats"]}]' "$SANDBOX/inv.yaml"
+  if python3 "$REPO_ROOT/lib/schema_check.py" "$REPO_ROOT/inventory/schema.yaml" "$SANDBOX/inv.yaml" >/dev/null 2>&1; then
+    t_fail "user_dirs object without path was accepted"
+  else
+    t_pass "user_dirs object without path rejected"
+  fi
+  # Invalid: object form with extra unknown key.
+  yq -i '.user_dirs = ["~/Documents", {"path": "~/.config/manicode/projects", "unknown": true}]' "$SANDBOX/inv.yaml"
+  if python3 "$REPO_ROOT/lib/schema_check.py" "$REPO_ROOT/inventory/schema.yaml" "$SANDBOX/inv.yaml" >/dev/null 2>&1; then
+    t_fail "user_dirs object with unknown key was accepted"
+  else
+    t_pass "user_dirs object with unknown key rejected"
+  fi
+  # Valid: legacy plain strings still work.
+  yq -i '.user_dirs = ["~/Documents", "~/.config/manicode/projects"]' "$SANDBOX/inv.yaml"
+  if python3 "$REPO_ROOT/lib/schema_check.py" "$REPO_ROOT/inventory/schema.yaml" "$SANDBOX/inv.yaml" >/dev/null 2>&1; then
+    t_pass "legacy plain string user_dirs still accepted"
+  else
+    t_fail "legacy plain string user_dirs was rejected"
+  fi
+  sandbox_cleanup
+fi
+
 t_begin "static: schema v6 accepts valid cron_jobs, rejects invalid entries"
 if ! command -v yq >/dev/null 2>&1; then
   echo "  SKIP: yq not installed — cron_jobs schema checks skipped"

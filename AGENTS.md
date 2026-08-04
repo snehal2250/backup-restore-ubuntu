@@ -193,8 +193,15 @@ flatpak_apps:                  # installed via: flatpak install -y flathub <item
   - org.gimp.GIMP
 dotfiles:                      # copied from/to $HOME (e.g. .bashrc, .gitconfig)
   - .bashrc
-user_dirs:                     # WHOLE user-data folders captured/restored in full
+user_dirs:                     # WHOLE user-data folders captured/restored in full.
+                               # May be a plain path string (legacy, schema v3-v6)
+                               # or an object with `path:` + optional `exclude:`
+                               # (schema v7+, for rsync exclude patterns like
+                               # `chats` to skip AI chat logs):
   - ~/Documents
+  - path: ~/.config/manicode/projects
+    exclude:
+      - "chats"
 
 apps:                          # one entry per MAIN app
   - name: opencode
@@ -283,6 +290,11 @@ Rules for agents editing the inventory:
   `installer.url` (+ `suite`/`key_url`/`key_fingerprint`/`packages` for `apt_repository`,
   `{arch}`/`{version}` templates, arch gates — see `inventory/schema.yaml`).
 - `config_paths` and `user_dirs` use `~` (tilde) form for portability.
+  `user_dirs` items (schema v7+) may be objects with a `path:` string and an optional
+  `exclude:` list of rsync patterns (same glob syntax as app-level `exclude`). This
+  allows excluding large re-downloadable files (e.g. AI chat logs, compiled caches)
+  from user-data directories while still capturing the rest. Legacy plain-string
+  entries remain valid and behave identically.
 - `validate_inventory` runs before all destructive operations. It has TWO layers:
   1. **Structural** — `inventory/schema.yaml` (versioned JSON Schema, draft 2020-12)
      enforced by a REAL validator (`lib/schema_check.py`: python3 + the reference
@@ -306,8 +318,8 @@ Rules for agents editing the inventory:
      `ubuntu_version:` record + the `--source` preflight warning.
 - `schema_version`/`profile` are top-level REQUIRED keys validated by the schema;
   never bump them without updating `inventory/schema.yaml` (`$id` + version) and docs.
-  The schema accepts `schema_version: 3`–`5` during the transitions (every change is an
-  optional addition); new inventories use 6.
+  The schema accepts `schema_version: 3`–`7` during the transitions (every change is an
+  optional addition); new inventories use 7.
 - `cron_jobs` (schema v6, OPTIONAL list — absent means none; the shipped inventory
   declares it, and the scripts read it null-safely, so v3-v5 inventories stay valid):
   each entry has a unique `name`,
