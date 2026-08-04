@@ -358,7 +358,10 @@ install_snap_packages() {
       classic=""
       [ "${entry##*:}" = "classic" ] && classic="--classic"
       info "Installing snap: $entry"
-      run sudo snap install $classic "$pkg" || mark_failure
+      # _run_snap_install (lib/installers.sh) warns when a large snap takes a
+      # long time so a slow download is not mistaken for a hang.
+      # shellcheck disable=SC2086  # $classic is empty or '--classic'
+      _run_snap_install "$pkg" $classic || mark_failure
     done
   fi
 }
@@ -594,7 +597,7 @@ fi
 
 # --- Phase 4: services -----------------------------------------------------
 restore_services() {
-  local unit target enable start sdir dest policy
+  local unit target enable start sdir dest policy _paired
   while IFS=$'\t' read -r unit target enable start; do
     [ -n "$unit" ] || continue
     [ "$target" = "user" ] || target="system"
@@ -643,12 +646,45 @@ restore_services() {
           warn "  $unit: NOT enabled/started (--packages-only skips config — re-run without --packages-only to activate)."
         fi
       elif [ "$CONFIGS_ONLY" = "0" ]; then
+        # Start is guarded (service_can_start): a unit whose ExecStart binary
+        # is missing — e.g. its app install failed earlier in this run — is
+        # enabled but NOT started, otherwise systemd sits in a restart loop.
+        # Timers also pass their paired .service so a timer whose payload
+        # cannot start is not started either (it would restart-loop the
+        # payload every time it fires). Warn-only, deliberately no
+        # mark_failure: the failed app install already set EXIT_INSTALL_FAILED.
+        # (Under --only/--skip an intentionally filtered-out app leaves its
+        # service enabled but not started with exit 0 — start it manually
+        # after installing the app.)
+        _paired=""
+        if [[ "$unit" == *.timer ]] && [ -f "$BACKUPS_DIR/services/${unit%.timer}.service/unit" ]; then
+          _paired="$BACKUPS_DIR/services/${unit%.timer}.service/unit"
+        fi
         if [ "$target" = "user" ]; then
-          [ "$enable" = "true" ] && run systemctl --user enable "$unit" 2>/dev/null || warn "  $unit: could not enable (no user session?)."
-          [ "$start" = "true" ] && run systemctl --user start "$unit" 2>/dev/null || warn "  $unit: could not start (no user session?)."
+          if [ "$enable" = "true" ]; then
+            run systemctl --user enable "$unit" 2>/dev/null || warn "  $unit: could not enable (no user session?)."
+          fi
+          if [ "$start" = "true" ]; then
+            if service_can_start "$unit" "$sdir/unit" "$_paired"; then
+              run systemctl --user start "$unit" 2>/dev/null || {
+                warn "  $unit: could not start (no user session?)."
+                # Clear the failed state so systemd does not keep retrying in a loop.
+                run systemctl --user reset-failed "$unit" 2>/dev/null || true
+              }
+            fi
+          fi
         else
-          [ "$enable" = "true" ] && run sudo systemctl enable "$unit"
-          [ "$start" = "true" ] && run sudo systemctl start "$unit"
+          if [ "$enable" = "true" ]; then
+            run sudo systemctl enable "$unit"
+          fi
+          if [ "$start" = "true" ]; then
+            if service_can_start "$unit" "$sdir/unit" "$_paired"; then
+              run sudo systemctl start "$unit" || {
+                warn "  $unit: failed to start — clearing the failed state so systemd does not keep retrying in a restart loop."
+                run sudo systemctl reset-failed "$unit" 2>/dev/null || true
+              }
+            fi
+          fi
         fi
       fi
       # Timer units: remind that the paired .service must exist for the timer
@@ -876,6 +912,10 @@ if phase_enabled postinstall; then
   info "Phase 6/6: post-install (groups, shell, extensions)"
 
 # --- Groups ---
+# Track groups actually added in THIS run so the wrap-up checklist only
+# suggests a re-login for memberships that genuinely need one — a group that
+# did not exist, or one the user was already in, is never listed.
+_NEW_GROUPS=()
 while IFS= read -r g; do
   [ -n "$g" ] || continue
   if getent group "$g" >/dev/null 2>&1; then
@@ -883,6 +923,7 @@ while IFS= read -r g; do
       ok "  group: $g already member"
     else
       run sudo usermod -aG "$g" "$USER"
+      [ "$DRY_RUN" != "1" ] && _NEW_GROUPS+=("$g")
       ok "  group: $g — user '$USER' added (log out and back in to take effect)"
     fi
   else
@@ -974,5 +1015,33 @@ echo "  1. Review the output above for warnings and failed items."
 echo "  2. Reboot so services and configuration take full effect."
 echo "  3. Keep everything current with ./update_all_ubuntu.sh"
 echo "  4. Verify key apps and services work before relying on this machine."
+
+# Inventory-derived post-restore checklist (real runs only, and only when the
+# postinstall phase actually ran): actionable manual steps no script can do for
+# you — a NEW login session for the groups added this run / the new shell, and
+# a re-login for apps whose extensions/models were just installed. Groups are
+# taken from $_NEW_GROUPS (only memberships actually created this run), so
+# nonexistent or pre-existing groups are never listed. Gated on phase_enabled
+# postinstall so --packages-only/--configs-only/--skip postinstall never print
+# advice for steps that were skipped.
+if [ "$DRY_RUN" != "1" ] && phase_enabled postinstall; then
+  _c_shell="$(yaml_get '.default_shell')"
+  _c_exts="$(yq -r '.apps[] | select((.extensions // []) | length > 0) | .name' "$INVENTORY_READ" 2>/dev/null || true)"
+  if [ "${#_NEW_GROUPS[@]}" -gt 0 ] || [ -n "$_c_shell" ] || [ -n "$_c_exts" ]; then
+    echo
+    echo "  Post-restore checklist (from your inventory):"
+    if [ "${#_NEW_GROUPS[@]}" -gt 0 ]; then
+      printf '    - Log out and back in so group memberships take effect: %s\n' "${_NEW_GROUPS[*]}"
+    fi
+    [ -n "$_c_shell" ] && echo "    - Default shell '$_c_shell' takes effect at your next login."
+    if [ -n "$_c_exts" ]; then
+      printf '    - Re-login (or restart) so installed extensions/models are picked up: '
+      # shellcheck disable=SC2086  # intentional word-split of the newline-separated names
+      printf '%s ' $_c_exts
+      printf '\n'
+    fi
+  fi
+  unset _c_shell _c_exts _NEW_GROUPS
+fi
 
 exit "$ACUMULATED_EXIT"

@@ -324,6 +324,61 @@ user_dir_exclude() {
   N="$ud_path" yq -r '.user_dirs[] | select((type == "object" and .path == strenv(N)) or (type == "string" and . == strenv(N))) | (if type == "object" and has("exclude") then .exclude[] else "" end)' "${EFFECTIVE_INVENTORY:-$INVENTORY_FILE}" 2>/dev/null | grep -v '^\s*$' || true
 }
 
+# --- Service start helpers ------------------------------------------------
+# service_start_binary UNIT_FILE — the first token of the unit's ExecStart=
+# line (systemd prefix chars -/@/: and surrounding quotes stripped), or empty
+# when the unit has no ExecStart (timers, sockets, path units, drop-ins).
+# Read-only: used by restore.sh to decide whether a unit can actually start
+# before calling systemctl — a unit whose ExecStart binary is missing would
+# otherwise sit in a systemd restart loop (cloudflared hit counter 118 in the
+# VirtualBox rehearsal after its install failed mid-restore).
+service_start_binary() {
+  local unit_file="$1" bin
+  # -r (not -f): an existing-but-unreadable file would make the sed pipeline
+  # below fail and the command substitution return nonzero under set -e.
+  [ -r "$unit_file" ] || return 0
+  # Best-effort: returns only the first token of the FIRST ExecStart line
+  # (a quoted binary path containing spaces resolves to its first word —
+  # acceptable for a start guard). sed -n '1p' (not head) avoids a
+  # SIGPIPE-under-pipefail abort when a unit file has several matching lines.
+  bin="$(sed -n 's/^[[:space:]]*ExecStart=//p' "$unit_file" | sed -n '1p' | sed 's/^[-@:]*//' | awk '{print $1}' | tr -d '"' | tr -d "'")"
+  printf '%s\n' "$bin"
+}
+
+# service_can_start UNIT_NAME UNIT_FILE [PAIRED_UNIT_FILE] — pre-start guard:
+# if the unit's ExecStart binary is missing on this machine (e.g. its app
+# install failed), starting it would only put systemd into a restart loop.
+# Returns 1 when start should be skipped. Units without ExecStart (timers,
+# sockets, path units) are startable on their own — but when PAIRED_UNIT_FILE
+# is given (a timer's paired .service), that unit's binary is checked too: a
+# timer whose payload cannot start would restart-loop it every time it fires.
+# Dry-run aware: prints the would-be skip as a [dry-run] note so --plan
+# previews are truthful.
+service_can_start() {
+  local unit_name="$1" unit_file="$2" paired_file="${3:-}" bin
+  bin="$(service_start_binary "$unit_file")"
+  if [ -n "$bin" ] && ! { [ -x "$bin" ] || command -v "$bin" >/dev/null 2>&1; }; then
+    if [ "$DRY_RUN" = "1" ]; then
+      printf '[dry-run] %s: ExecStart binary %s not found — start skipped on a real run (avoids a systemd restart loop).\n' "$unit_name" "$bin"
+    else
+      warn "  $unit_name: ExecStart binary '$bin' not found — NOT starting (avoids a systemd restart loop). The unit is enabled; start it manually once the app is installed."
+    fi
+    return 1
+  fi
+  if [ -n "$paired_file" ]; then
+    bin="$(service_start_binary "$paired_file")"
+    if [ -n "$bin" ] && ! { [ -x "$bin" ] || command -v "$bin" >/dev/null 2>&1; }; then
+      if [ "$DRY_RUN" = "1" ]; then
+        printf '[dry-run] %s: paired unit binary %s not found — start skipped on a real run (the payload would restart-loop when triggered).\n' "$unit_name" "$bin"
+      else
+        warn "  $unit_name: paired unit's ExecStart binary '$bin' not found — NOT starting (its payload would restart-loop when triggered). The unit is enabled; start it manually once the app is installed."
+      fi
+      return 1
+    fi
+  fi
+  return 0
+}
+
 # --- Safe path helpers ---------------------------------------------------
 # normalize_path: resolve '~' and '..' then canonicalise.
 # Returns the canonical path; exits non-zero if it escapes $HOME or /.

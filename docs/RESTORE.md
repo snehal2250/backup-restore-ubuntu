@@ -275,7 +275,13 @@ app via its typed `installer:` record (`apt`/`snap`/`snap_classic`/`flatpak`/
 `/etc/systemd/system/` (system) or `~/.config/systemd/user/` (user), `daemon-reload` runs,
 then its `config_paths` (env file, config dir, ...) are restored, and **then**
 `enable`/`start` per the declaration — so the service boots with its real configuration
-on first start. Timers are declared as ordinary `services:` entries (e.g.
+on first start. Before `start`, the unit's `ExecStart=` binary is checked: if it is
+missing (e.g. the app it belongs to failed to install mid-restore), the unit is enabled
+but NOT started — a missing binary would otherwise put systemd into a restart loop (the
+cloudflared counter-118 rehearsal finding). A `*.timer` is additionally only started
+when its paired `.service`'s binary exists, so a timer never restart-loops a payload
+that cannot run. A `start` that still fails is followed by `systemctl reset-failed` so
+systemd never keeps retrying. Timers are declared as ordinary `services:` entries (e.g.
 `trading-bot-telegram.timer`, with its paired `trading-bot-telegram.service` declared
 too); the timer is enabled/started and pulls its service in.
 

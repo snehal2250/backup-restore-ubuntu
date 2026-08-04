@@ -429,6 +429,18 @@ journal is created up front on real runs and records `phase-start`/`phase-done` 
 (the durable phase journal). Under `--packages-only`, services are installed but NOT
 enabled/started. Restore exits nonzero if any required item failed.
 
+Service start is **guarded**: before `systemctl start`, `restore.sh` checks that the
+unit's `ExecStart=` binary exists (`service_start_binary` / `service_can_start` in
+`lib/common.sh`). A unit whose app install failed is still installed + enabled but NOT
+started — a missing binary would otherwise put systemd into a restart loop (the
+cloudflared counter-118 rehearsal finding). A `*.timer` is additionally only started
+when its paired `.service`'s binary exists (otherwise the timer would restart-loop its
+payload every time it fires). A `start` that still fails is followed by
+`systemctl reset-failed` so systemd never keeps retrying. On real runs the wrap-up also
+prints an inventory-derived post-restore checklist (new login session for the `groups`
+added this run and the `default_shell`; re-login for apps whose `extensions`/models
+were installed).
+
 **Post-restore** — groups, default shell, app extensions/models are applied:
 ```bash
 # groups (e.g. docker) — user added via usermod -aG

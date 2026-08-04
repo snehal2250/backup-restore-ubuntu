@@ -247,6 +247,14 @@ object form by editing `inventory.yaml`.
 (unit files in `/etc/systemd/system` or `~/.config/systemd/user`). Default system services
 are never touched.
 
+**What if a service's app failed to install during restore?** The unit is still installed
+and enabled, but `restore.sh` checks the unit's `ExecStart=` binary before starting it
+(`service_can_start` in `lib/common.sh`). If the binary is missing (e.g. its app install
+failed mid-restore), the service is **enabled but not started** — starting it would put
+systemd into a restart loop (the cloudflared counter-118 rehearsal finding). A `*.timer`
+is additionally only started when its paired `.service`'s binary exists. A `start` that
+still fails is followed by `systemctl reset-failed` so systemd never keeps retrying.
+
 **Are systemd timers and cron jobs backed up?** Yes. **Timers** are declared as ordinary
 `services:` entries (`./inventory.sh add-service`, e.g. `trading-bot-telegram.timer` —
 its paired `trading-bot-telegram.service` should be declared too; `validate` reminds you

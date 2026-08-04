@@ -178,16 +178,37 @@ _installer_apt() {
   run sudo apt-get install -y "$(installer_pkg "$name")"
 }
 
+# _run_snap_install PKG [FLAGS...] — sudo snap install with a stall warning:
+# large snaps (ollama ~1.2 GB, onlyoffice ~1.2 GB) can take many minutes with
+# no output; warn after SNAP_STALL_SECS (default 300) so a slow download is
+# not mistaken for a hang. Dry-run aware via run() (prints, returns 0, so the
+# elapsed time stays ~0 and no warning fires on a preview).
+SNAP_STALL_SECS="${SNAP_STALL_SECS:-300}"
+_run_snap_install() {
+  local pkg="$1"; shift
+  local start elapsed rc
+  start="$(date +%s)"
+  run sudo snap install "$@" "$pkg"
+  rc=$?
+  elapsed=$(( $(date +%s) - start ))
+  # Only on SUCCESS: a failed install after a long time is reported by the
+  # caller's error handling — don't paper over it with a "this is normal" note.
+  if [ "$rc" = "0" ] && [ "$elapsed" -gt "$SNAP_STALL_SECS" ]; then
+    warn "  snap '$pkg' took ${elapsed}s to install — large snaps are slow; this is normal (not a hang)."
+  fi
+  return "$rc"
+}
+
 _installer_snap() {
   local name="$1"
   command -v snap >/dev/null 2>&1 || { warn "  $name: snap is not available on this system."; return 1; }
-  run sudo snap install "$(installer_pkg "$name")"
+  _run_snap_install "$(installer_pkg "$name")"
 }
 
 _installer_snap_classic() {
   local name="$1"
   command -v snap >/dev/null 2>&1 || { warn "  $name: snap is not available on this system."; return 1; }
-  run sudo snap install --classic "$(installer_pkg "$name")"
+  _run_snap_install "$(installer_pkg "$name")" --classic
 }
 
 _installer_flatpak() {
