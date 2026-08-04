@@ -67,6 +67,15 @@
 # addition, so `schema_version: 5` (and 3/4) inventories remain valid during
 # the transition — the schema accepts 3, 4, 5 and 6. New inventories use 6.
 #
+# v7 changes: `user_dirs` items may now be EITHER a plain string (legacy,
+# backward compatible) OR an object with `path:` (the directory path) and
+# optional `exclude:` (rsync exclude patterns, same glob syntax as apps)
+# to filter what gets backed up (e.g. exclude `chats/` from a project dir).
+# Plain strings remain valid and behave identically to before. NOTE: every v7
+# change is an optional addition, so `schema_version: 6` (and 3-5) inventories
+# remain valid during the transition — the schema accepts 3, 4, 5, 6 and 7.
+# New inventories use 7.
+#
 # Semantic rules that a schema cannot express — unique app/service names,
 # default_shell provided by a declared package, overlapping path ownership,
 # config nested under an excluded path, {version} URL template completeness,
@@ -74,8 +83,8 @@
 # validate_inventory() in lib/common.sh. This file is structure only.
 # =============================================================================
 $schema: "https://json-schema.org/draft/2020-12/schema"
-$id: "https://backup-restore-ubuntu.local/schema/inventory-v6"
-title: "Backup-Restore-Ubuntu inventory schema (v6)"
+$id: "https://backup-restore-ubuntu.local/schema/inventory-v7"
+title: "Backup-Restore-Ubuntu inventory schema (v7)"
 description: "Structural contract for inventory/inventory.yaml, profile: workstation."
 
 type: object
@@ -101,8 +110,8 @@ required:
 
 properties:
   schema_version:
-    enum: [3, 4, 5, 6]
-    description: "6 is the current version; 3-5 are accepted during the v5/v6 transitions (every v5/v6 change is an optional, backward-compatible addition). New inventories use 6."
+    enum: [3, 4, 5, 6, 7]
+    description: "7 is the current version; 3-6 are accepted during the v6/v7 transitions (every v6/v7 change is an optional, backward-compatible addition). New inventories use 7."
   profile:
     enum:
       - workstation
@@ -141,10 +150,13 @@ properties:
       pattern: "^[a-z_][a-z0-9_-]{0,31}$"
   user_dirs:
     type: array
+    description: "Whole user-data folders; must use the ~/ form, never '~' itself, and never '..'. Items may be a plain path string (legacy) or an object with path + optional exclude (schema v7+)."
     items:
-      type: string
-      pattern: "^(?!.*\\.\\.)~/[^\\x00-\\x1f]+$"
-    description: "Whole user-data folders; must use the ~/ form, never '~' itself, and never '..'."
+      oneOf:
+        - type: string
+          pattern: "^(?!.*\\.\\.)~/[^\\x00-\\x1f]+$"
+          description: "Legacy: plain path string (backward compatible)."
+        - $ref: "#/$defs/userDirWithExclude"
   apps:
     type: array
     items:
@@ -312,6 +324,10 @@ $defs:
         type: string
         pattern: "^[^\\x00-\\x1f ]+$"
         description: "apt_repository suite; the literal value 'codename' resolves to the running Ubuntu codename (e.g. noble)."
+      codename_fallback:
+        type: string
+        pattern: "^[a-z][a-z0-9]*$"
+        description: "apt_repository (optional): when suite: codename, the previous release codename (e.g. noble) to fall back to if the vendor does not publish a repo for the RUNNING codename (e.g. azure-cli publishes noble but not resolute). Keeps the inventory version-agnostic while still installing from a supported suite."
       components:
         type: array
         items:
@@ -390,6 +406,7 @@ $defs:
             url: false
             suite: false
             components: false
+            codename_fallback: false
             key_url: false
             key_fingerprint: false
             packages: false
@@ -474,6 +491,7 @@ $defs:
             package: false
             suite: false
             components: false
+            codename_fallback: false
             key_url: false
             key_fingerprint: false
             packages: false
@@ -499,6 +517,7 @@ $defs:
             package: false
             suite: false
             components: false
+            codename_fallback: false
             key_url: false
             key_fingerprint: false
             packages: false
@@ -522,6 +541,7 @@ $defs:
             package: false
             suite: false
             components: false
+            codename_fallback: false
             key_url: false
             key_fingerprint: false
             packages: false
@@ -585,6 +605,24 @@ $defs:
         enum: [warn, fail]
         default: warn
         description: "Per-service policy for missing parts: warn (default) degrades the backup; fail records a 'failed' artifact (same effect as required: true)."
+
+  userDirWithExclude:
+    type: object
+    additionalProperties: false
+    description: "A user data directory with optional rsync exclude patterns (schema v7)."
+    required:
+      - path
+    properties:
+      path:
+        type: string
+        pattern: "^(?!.*\\.\\.)~/[^\\x00-\\x1f]+$"
+        description: "The directory path; must use ~/ form."
+      exclude:
+        type: array
+        items:
+          type: string
+          pattern: "^(?!.*\\.\\.)[^~/][^\\x00-\\x1f]*$"
+        description: "Optional rsync exclude patterns (globs allowed); same format as app exclude. Files/dirs matching these patterns are skipped during backup and restore."
 
   cronJob:
     type: object

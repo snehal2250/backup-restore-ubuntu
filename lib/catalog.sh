@@ -35,10 +35,10 @@ catalog_to_yaml() {
   # keys like config_paths accumulate newline-separated, as in inventory.sh).
   local k v
   unset installer_type installer_package installer_url installer_suite \
-        installer_components installer_key_url installer_key_fingerprint \
-        installer_packages installer_arch installer_checksum \
-        installer_checksum_url installer_unverified installer_binary \
-        installer_dest installer_version installer_version_url \
+        installer_codename_fallback installer_components installer_key_url \
+        installer_key_fingerprint installer_packages installer_arch \
+        installer_checksum installer_checksum_url installer_unverified \
+        installer_binary installer_dest installer_version installer_version_url \
         installer_version_query description check_cmd depends_apt \
         config_paths exclude extensions 2>/dev/null || true
   while IFS='=' read -r k v; do
@@ -55,7 +55,7 @@ catalog_to_yaml() {
   [ -n "${description:-}" ] && printf 'description: "%s"\n' "$(esc "$description")"
   echo "installer:"
   printf '  type: "%s"\n' "$(esc "$installer_type")"
-  for k2 in package url suite key_url key_fingerprint arch checksum checksum_url binary dest version version_url version_query; do
+  for k2 in package url suite codename_fallback key_url key_fingerprint arch checksum checksum_url binary dest version version_url version_query; do
     varname="installer_$k2"
     v2="${!varname:-}"
     [ -n "$v2" ] && printf '  %s: "%s"\n' "$k2" "$(esc "$v2")"
@@ -181,7 +181,10 @@ description=Go toolchain (official go.dev tarball)
 installer_type=tarball
 installer_url=https://go.dev/dl/{version}.linux-{arch}.tar.gz
 installer_version_url=https://go.dev/VERSION?m=text
-installer_checksum_url=https://go.dev/dl/{version}.linux-{arch}.tar.gz.sha256
+# Pinned checksum: go.dev's .sha256 sidecar URL returns an HTML error page
+# (as of 2026-08), which fails verification. The tarball itself downloads
+# fine — pin its sha256 directly (bump when the version bumps).
+installer_checksum=5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053
 installer_binary=go/bin/go
 installer_dest=/usr/local
 check_cmd=go
@@ -232,6 +235,7 @@ description=Microsoft Azure CLI (official MS apt repo)
 installer_type=apt_repository
 installer_url=https://packages.microsoft.com/repos/azure-cli
 installer_suite=codename
+installer_codename_fallback=noble
 installer_components=main
 installer_key_url=https://packages.microsoft.com/keys/microsoft.asc
 installer_packages=azure-cli
@@ -282,7 +286,7 @@ installer_unverified=true
 check_cmd=google-chrome
 depends_apt=curl
 config_paths=~/.config/google-chrome
-exclude=optimization_guide_model_store component_crx_cache WasmTtsEngine Safe*Browsing OnDeviceHeadSuggestModel GPUPersistentCache Crashpad GPUCache
+exclude=optimization_guide_model_store component_crx_cache WasmTtsEngine Safe*Browsing OnDeviceHeadSuggestModel GPUPersistentCache Crashpad GPUCache Service Worker/CacheStorage
 EOF
       ;;
     fish)

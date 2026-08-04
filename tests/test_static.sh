@@ -120,28 +120,28 @@ else
   sandbox_cleanup
 fi
 
-t_begin "static: schema v3-v6 inventories all validate (v6 transition), unknown rejected"
+t_begin "static: schema v3-v7 inventories all validate (v7 transition), unknown rejected"
 if ! command -v python3 >/dev/null 2>&1 || ! python3 -c 'import jsonschema, yaml' >/dev/null 2>&1; then
   echo "  SKIP: python3 + jsonschema + yaml not available"
 else
   sandbox_new
   cp "$REPO_ROOT/inventory/inventory.yaml" "$SANDBOX/inv.yaml"
-  # schema_version 3, 4 and 5 (pre-v6) must remain valid — every v6 change is
-  # optional (cron_jobs is opt-in).
-  for _v in 3 4 5 6; do
+  # schema_version 3-6 must remain valid — every v7 change is optional
+  # (user_dirs objects with exclude are opt-in).
+  for _v in 3 4 5 6 7; do
     yq -i ".schema_version = $_v" "$SANDBOX/inv.yaml"
     if python3 "$REPO_ROOT/lib/schema_check.py" "$REPO_ROOT/inventory/schema.yaml" "$SANDBOX/inv.yaml" >/dev/null 2>&1; then
-      t_pass "schema_version $_v accepted (v6 transition)"
+      t_pass "schema_version $_v accepted (v7 transition)"
     else
       t_fail "schema_version $_v was rejected (should stay valid during the transition)"
     fi
   done
   # Unknown versions must still be rejected.
-  yq -i '.schema_version = 7' "$SANDBOX/inv.yaml"
+  yq -i '.schema_version = 8' "$SANDBOX/inv.yaml"
   if python3 "$REPO_ROOT/lib/schema_check.py" "$REPO_ROOT/inventory/schema.yaml" "$SANDBOX/inv.yaml" >/dev/null 2>&1; then
-    t_fail "schema_version 7 was accepted"
+    t_fail "schema_version 8 was accepted"
   else
-    t_pass "schema_version 7 rejected"
+    t_pass "schema_version 8 rejected"
   fi
   sandbox_cleanup
 fi

@@ -301,6 +301,29 @@ installer_has() {
   N="$name" yq -e ".apps[] | select(.name == strenv(N)) | .installer$q != null" "${EFFECTIVE_INVENTORY:-$INVENTORY_FILE}" >/dev/null 2>&1
 }
 
+# user_dir_paths: list user_dirs entries as PLAIN PATHS, handling both the
+# legacy string form (schema v3-v6) and the new object form with path+exclude
+# (schema v7). For each item:
+#   - string -> print the string as-is
+#   - object with .path -> print .path
+# Returns one path per line (empty lines suppressed).
+user_dir_paths() {
+  require_yq "$YQ_AUTO"
+  yq -r '.user_dirs[] | (if type == "object" then .path else . end)' "${EFFECTIVE_INVENTORY:-$INVENTORY_FILE}" 2>/dev/null | grep -v '^\s*$' || true
+}
+
+# user_dir_exclude PATH -> prints the exclude patterns for one user_dir entry
+# (one per line, empty if none). PATH is the expanded path (e.g.
+# ~/.config/manicode/projects). Only object-form entries with an exclude list
+# produce output; legacy string-form entries produce nothing.
+user_dir_exclude() {
+  require_yq "$YQ_AUTO"
+  local ud_path="$1"
+  # Match the entry in user_dirs that has this path (either as a plain string
+  # or as .path in an object). Then print its .exclude[] items.
+  N="$ud_path" yq -r '.user_dirs[] | select((type == "object" and .path == strenv(N)) or (type == "string" and . == strenv(N))) | (if type == "object" and has("exclude") then .exclude[] else "" end)' "${EFFECTIVE_INVENTORY:-$INVENTORY_FILE}" 2>/dev/null | grep -v '^\s*$' || true
+}
+
 # --- Safe path helpers ---------------------------------------------------
 # normalize_path: resolve '~' and '..' then canonicalise.
 # Returns the canonical path; exits non-zero if it escapes $HOME or /.
@@ -599,7 +622,7 @@ check_config_overlaps() {
   while IFS= read -r d; do
     [ -n "$d" ] || continue
     types+=(user_dir); owners+=(""); paths+=("$(_norm_overlap_path "$d")"); labels+=("user_dir")
-  done < <(yaml_list '.user_dirs[]')
+  done < <(user_dir_paths)
 
   local i j n="${#paths[@]}"
   for (( i = 0; i < n; i++ )); do
@@ -862,7 +885,7 @@ validate_inventory() {
   fi
 
   # 6) user_dirs semantics: under $HOME, never $HOME itself (form + traversal
-  #    are already enforced by the schema).
+  #    are already enforced by the schema). Validate each entry's path.
   local d
   while IFS= read -r d; do
     [ -n "$d" ] || continue
@@ -875,7 +898,7 @@ validate_inventory() {
       warn "  user_dirs: path '$d' is not under \$HOME"
       errors=$((errors + 1))
     fi
-  done < <(yaml_list '.user_dirs[]')
+  done < <(user_dir_paths)
 
   # 7) deb/tarball URLs must resolve their {version} placeholders.
   if ! check_installer_templates; then

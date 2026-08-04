@@ -297,10 +297,18 @@ while IFS= read -r d; do
     continue
   fi
   rel="${src#"$HOME"/}"
-  ( cd "$HOME" && _safe_rsync "$STAGE/user-dirs" "./$rel" )
+  # Build exclude array from the entry's object-form exclude list (schema v7).
+  excl=()
+  while IFS= read -r e; do
+    [ -n "$e" ] && excl+=(--exclude="$e")
+  done < <(user_dir_exclude "$d")
+  if [ "${#excl[@]}" -gt 0 ]; then
+    info "  (excluded from user-dir backup: ${excl[*]#--exclude=})"
+  fi
+  ( cd "$HOME" && _safe_rsync "$STAGE/user-dirs" "./$rel" "${excl[@]}" )
   record_artifact "user-dirs/$rel" "captured"
   ok "  $d -> backups/user-dirs/"
-done < <(yaml_list '.user_dirs[]')
+done < <(user_dir_paths)
 
 # --- Determine overall status ---------------------------------------------
 _missing_count="$(manifest_count_status "missing" "$ARTIFACTS")"

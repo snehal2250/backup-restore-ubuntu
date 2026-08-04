@@ -235,18 +235,33 @@ _installer_apt_repository() {
   fi
   [ "${#packages[@]}" -gt 0 ] || { err "  $name: apt_repository installer requires at least one package"; return 1; }
 
+  local slug keyfile deb_opts line fallback
+  slug="$(printf '%s' "$name" | tr -cd 'a-z0-9._-')"
+  # Binary .gpg keyring: apt >= 3.x (Ubuntu 25.10+) rejects armored keys
+  # in .asc files with "unsupported filetype"; the binary keyring is accepted
+  # by both old and new apt, and matches the host's own keyrings (docker.gpg).
+  keyfile="/etc/apt/keyrings/${slug}.gpg"
+  deb_opts="signed-by=$keyfile"
+  [ -n "$arch" ] && deb_opts="arch=$arch ${deb_opts}"
+  fallback="$(installer_get "$name" '.codename_fallback')"
+
   if [ "$suite" = "codename" ]; then
     suite="$(ubuntu_codename)" || return 1
   fi
 
-  local slug keyfile deb_opts line
-  slug="$(printf '%s' "$name" | tr -cd 'a-z0-9._-')"
-  keyfile="/etc/apt/keyrings/${slug}.asc"
-  deb_opts="signed-by=$keyfile"
-  [ -n "$arch" ] && deb_opts="arch=$arch ${deb_opts}"
-
   run sudo install -m 0755 -d /etc/apt/keyrings || return 1
   run sudo curl -fsSL -o "$keyfile" "$key_url" || return 1
+  # Normalize to a BINARY keyring: apt >= 3.x (Ubuntu 25.10+) rejects ASCII-
+  # armored keys with "unsupported filetype", and some vendors serve their key
+  # armored (microsoft.asc, docker gpg) while others serve binary (gh, cloudflared).
+  # gpg --dearmor accepts both, so the keyring is always binary afterwards.
+  if command -v gpg >/dev/null 2>&1 && sudo grep -q 'BEGIN PGP' "$keyfile" 2>/dev/null; then
+    if ! sudo gpg --dearmor --yes -o "$keyfile.bin" "$keyfile" 2>/dev/null; then
+      err "  $name: could not de-armor the repository key $keyfile"
+      return 1
+    fi
+    run sudo mv "$keyfile.bin" "$keyfile" || return 1
+  fi
   run sudo chmod a+r "$keyfile" || return 1
 
   if [ -n "$fp" ]; then
@@ -259,7 +274,22 @@ _installer_apt_repository() {
   done
   printf '%s\n' "$line" | run sudo tee "/etc/apt/sources.list.d/${slug}.list" >/dev/null || return 1
 
-  run sudo apt-get update || return 1
+  # Try the running codename first; if the vendor does not publish a repo for
+  # it (e.g. azure-cli has noble but not resolute), fall back to the declared
+  # previous codename and retry — keeps the inventory version-agnostic.
+  if ! run sudo apt-get update; then
+    if [ -n "$fallback" ] && [ "$suite" != "$fallback" ]; then
+      warn "  $name: no apt repo for suite '$suite' — falling back to '$fallback'."
+      line="deb [${deb_opts}] ${url} ${fallback}"
+      for c in "${comps[@]}"; do
+        line="${line} ${c}"
+      done
+      printf '%s\n' "$line" | run sudo tee "/etc/apt/sources.list.d/${slug}.list" >/dev/null || return 1
+      run sudo apt-get update || return 1
+    else
+      return 1
+    fi
+  fi
   run sudo apt-get install -y "${packages[@]}" || return 1
   return 0
 }

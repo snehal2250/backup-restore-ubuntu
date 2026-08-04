@@ -147,12 +147,18 @@ cmd_list() {
   echo "=== User dirs ==="
   while IFS= read -r d; do
     [ -n "$d" ] || continue
+    local excl_tags=""
+    local -a ud_excl=()
+    while IFS= read -r e; do
+      [ -n "$e" ] && ud_excl+=("$e")
+    done < <(user_dir_exclude "$d")
+    [ "${#ud_excl[@]}" -gt 0 ] && excl_tags="  exclude: ${ud_excl[*]}"
     if [ -d "$(expand_path "$d")" ]; then
-      echo "    [x] $d"
+      echo "    [x] $d$excl_tags"
     else
-      echo "    [ ] $d"
+      echo "    [ ] $d$excl_tags"
     fi
-  done < <(yaml_list '.user_dirs[]')
+  done < <(user_dir_paths)
   echo
 
   echo "=== Services ==="
@@ -257,7 +263,7 @@ write_app() {
       echo "  installer:"
       printf '    type: "%s"\n' "$(esc "$installer_type")"
       local k v varname l
-      for k in package url suite key_url key_fingerprint arch checksum checksum_url binary dest version version_url version_query; do
+      for k in package url suite codename_fallback key_url key_fingerprint arch checksum checksum_url binary dest version version_url version_query; do
         varname="installer_$k"
         v="${!varname:-}"
         [ -n "$v" ] && printf '    %s: "%s"\n' "$k" "$(esc "$v")"
@@ -350,7 +356,7 @@ cmd_add_app() {
   fi
 
   # Clear any installer_* state from a previous catalog lookup.
-  unset installer_type installer_package installer_url installer_suite installer_components installer_key_url installer_key_fingerprint installer_packages installer_arch installer_checksum installer_checksum_url installer_unverified installer_binary installer_dest installer_version installer_version_url installer_version_query 2>/dev/null || true
+  unset installer_type installer_package installer_url installer_suite installer_codename_fallback installer_components installer_key_url installer_key_fingerprint installer_packages installer_arch installer_checksum installer_checksum_url installer_unverified installer_binary installer_dest installer_version installer_version_url installer_version_query 2>/dev/null || true
 
   local template
   template="$(catalog_lookup "$name")"
@@ -384,7 +390,7 @@ cmd_add_app() {
     fi
     desc=""; check=""; deps=""; paths=""; excl=""
     unset description check_cmd depends_apt config_paths exclude extensions
-    unset installer_type installer_package installer_url installer_suite installer_components installer_key_url installer_key_fingerprint installer_packages installer_arch installer_checksum installer_checksum_url installer_unverified installer_binary installer_dest installer_version installer_version_url installer_version_query 2>/dev/null || true
+    unset installer_type installer_package installer_url installer_suite installer_codename_fallback installer_components installer_key_url installer_key_fingerprint installer_packages installer_arch installer_checksum installer_checksum_url installer_unverified installer_binary installer_dest installer_version installer_version_url installer_version_query 2>/dev/null || true
     echo
     echo "Running the manual wizard instead."
   fi
@@ -685,7 +691,7 @@ cmd_add_user_dir() {
   local dir="${1:-}"
   [ -n "$dir" ] || die "Usage: ./inventory.sh add-user-dir <path> (e.g. ~/Documents)"
   dir="$(_norm_dir "$dir")" || die "Invalid path."
-  if yaml_list '.user_dirs[]' | grep -Fqx "$dir"; then
+  if user_dir_paths | grep -Fqx "$dir"; then
     warn "'$dir' is already in the user_dirs list."
     return 0
   fi
@@ -698,11 +704,12 @@ cmd_remove_user_dir() {
   local dir="${1:-}"
   [ -n "$dir" ] || die "Usage: ./inventory.sh remove-user-dir <path>"
   dir="$(_norm_dir "$dir")" || die "Invalid path."
-  if ! yaml_list '.user_dirs[]' | grep -Fqx "$dir"; then
+  if ! user_dir_paths | grep -Fqx "$dir"; then
     warn "'$dir' is not in the user_dirs list."
     return 0
   fi
-  P="$dir" yq -i ".user_dirs |= map(select(. != strenv(P)))" "$INVENTORY_FILE"
+  # Remove both string-form and object-form entries matching this path.
+  P="$dir" yq -i ".user_dirs |= map(select((type == \"string\" and . != strenv(P)) or (type == \"object\" and .path != strenv(P))))" "$INVENTORY_FILE"
   ok "Removed user dir '$dir'."
 }
 

@@ -67,7 +67,7 @@
 #                At most one source: user entry. Names: no dots for cron.d files.
 # =============================================================================
 
-schema_version: 6 # must match inventory/schema.yaml (bump both together); 3-5 still validate during the transition
+schema_version: 7 # must match inventory/schema.yaml (bump both together); 3-6 still validate during the transition
 profile: workstation # machine profile, validated against the schema
 default_shell: /usr/bin/fish
 apt_packages: []
@@ -81,7 +81,9 @@ groups:
   - docker
 user_dirs:
   - ~/Documents
-  - ~/.config/manicode/projects
+  - path: ~/.config/manicode/projects
+    exclude:
+      - "chats"
 apps:
   - name: "opencode"
     description: "AI coding agent (opencode.ai)"
@@ -227,6 +229,7 @@ apps:
       - "Crashpad"
       - "GPUCache"
       - "Singleton*" # runtime singletons (SingletonSocket/Lock/Cookie) while Chrome runs
+      - "Service Worker/CacheStorage"
   - name: "fish"
     description: "Friendly interactive shell (official apt)"
     installer:
@@ -310,6 +313,7 @@ apps:
       type: apt_repository
       url: "https://packages.microsoft.com/repos/azure-cli"
       suite: "codename"
+      codename_fallback: "noble"
       components:
         - "main"
       key_url: "https://packages.microsoft.com/keys/microsoft.asc"

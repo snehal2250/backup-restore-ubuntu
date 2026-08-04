@@ -844,18 +844,24 @@ restore_user_dirs() {
     fi
     rel="${src#"$HOME"/}"
     if [ -d "$BACKUPS_DIR/user-dirs/$rel" ]; then
+      # Build exclude array from the entry's object-form exclude list (schema v7).
+      local -a excl=()
+      local e
+      while IFS= read -r e; do
+        [ -n "$e" ] && excl+=(--exclude="$e")
+      done < <(user_dir_exclude "$d")
       run mkdir -p "$HOME/$rel"
       if rollback_capture "$BACKUPS_DIR/user-dirs/$rel" "$HOME/$rel" "user-dirs/$rel"; then
         journal_log "created" "user-dirs/$rel"
       else
         journal_log "replaced" "user-dirs/$rel"
       fi
-      run rsync -a "$BACKUPS_DIR/user-dirs/$rel/" "$HOME/$rel/"
+      run rsync -a "${excl[@]}" "$BACKUPS_DIR/user-dirs/$rel/" "$HOME/$rel/"
       ok "  user dir: $d restored"
     else
       warn "  user dir '$d': no backup in $BACKUP_LABEL/user-dirs — skipping."
     fi
-  done < <(yaml_list '.user_dirs[]')
+  done < <(user_dir_paths)
 }
 
   restore_user_dirs
