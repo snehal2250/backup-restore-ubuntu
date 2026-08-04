@@ -253,7 +253,9 @@ and enabled, but `restore.sh` checks the unit's `ExecStart=` binary before start
 failed mid-restore), the service is **enabled but not started** — starting it would put
 systemd into a restart loop (the cloudflared counter-118 rehearsal finding). A `*.timer`
 is additionally only started when its paired `.service`'s binary exists. A `start` that
-still fails is followed by `systemctl reset-failed` so systemd never keeps retrying.
+still fails is followed by `systemctl stop` + `systemctl reset-failed` (the `stop`
+cancels a scheduled auto-restart, which `reset-failed` alone cannot) so systemd never
+keeps retrying.
 
 **Are systemd timers and cron jobs backed up?** Yes. **Timers** are declared as ordinary
 `services:` entries (`./inventory.sh add-service`, e.g. `trading-bot-telegram.timer` —

@@ -667,8 +667,11 @@ restore_services() {
           if [ "$start" = "true" ]; then
             if service_can_start "$unit" "$sdir/unit" "$_paired"; then
               run systemctl --user start "$unit" 2>/dev/null || {
-                warn "  $unit: could not start (no user session?)."
-                # Clear the failed state so systemd does not keep retrying in a loop.
+                warn "  $unit: could not start (no user session?) — stopping it and clearing the failed state."
+                # stop cancels a scheduled auto-restart; reset-failed then
+                # clears the failure record (reset-failed alone is a no-op
+                # while the unit is in auto-restart state).
+                run systemctl --user stop "$unit" 2>/dev/null || true
                 run systemctl --user reset-failed "$unit" 2>/dev/null || true
               }
             fi
@@ -680,7 +683,13 @@ restore_services() {
           if [ "$start" = "true" ]; then
             if service_can_start "$unit" "$sdir/unit" "$_paired"; then
               run sudo systemctl start "$unit" || {
-                warn "  $unit: failed to start — clearing the failed state so systemd does not keep retrying in a restart loop."
+                warn "  $unit: failed to start — stopping it and clearing the failed state so systemd does not keep retrying in a restart loop."
+                # stop FIRST: it cancels a scheduled auto-restart (reset-failed
+                # alone is a no-op while the unit is in auto-restart state),
+                # then reset-failed clears the failure record. Rehearsal
+                # finding: a Restart=always unit with an unlimited StartLimit
+                # would otherwise keep climbing (cloudflared hit 118).
+                run sudo systemctl stop "$unit" 2>/dev/null || true
                 run sudo systemctl reset-failed "$unit" 2>/dev/null || true
               }
             fi

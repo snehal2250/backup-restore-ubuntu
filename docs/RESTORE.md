@@ -280,8 +280,10 @@ missing (e.g. the app it belongs to failed to install mid-restore), the unit is 
 but NOT started — a missing binary would otherwise put systemd into a restart loop (the
 cloudflared counter-118 rehearsal finding). A `*.timer` is additionally only started
 when its paired `.service`'s binary exists, so a timer never restart-loops a payload
-that cannot run. A `start` that still fails is followed by `systemctl reset-failed` so
-systemd never keeps retrying. Timers are declared as ordinary `services:` entries (e.g.
+that cannot run. A `start` that still fails is followed by `systemctl stop` +
+`systemctl reset-failed` (the `stop` cancels a scheduled auto-restart — `reset-failed`
+alone is a no-op while the unit is in auto-restart state) so systemd never keeps
+retrying. Timers are declared as ordinary `services:` entries (e.g.
 `trading-bot-telegram.timer`, with its paired `trading-bot-telegram.service` declared
 too); the timer is enabled/started and pulls its service in.
 

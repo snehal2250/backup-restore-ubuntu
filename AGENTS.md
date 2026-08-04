@@ -436,10 +436,12 @@ started — a missing binary would otherwise put systemd into a restart loop (th
 cloudflared counter-118 rehearsal finding). A `*.timer` is additionally only started
 when its paired `.service`'s binary exists (otherwise the timer would restart-loop its
 payload every time it fires). A `start` that still fails is followed by
-`systemctl reset-failed` so systemd never keeps retrying. On real runs the wrap-up also
-prints an inventory-derived post-restore checklist (new login session for the `groups`
-added this run and the `default_shell`; re-login for apps whose `extensions`/models
-were installed).
+`systemctl stop` + `systemctl reset-failed` — the `stop` cancels a scheduled
+auto-restart (reset-failed alone is a no-op while the unit is in auto-restart state,
+so an unlimited-StartLimit Restart=always unit would otherwise keep climbing). On real
+runs the wrap-up also prints an inventory-derived post-restore checklist (new login
+session for the `groups` added this run and the `default_shell`; re-login for apps
+whose `extensions`/models were installed).
 
 **Post-restore** — groups, default shell, app extensions/models are applied:
 ```bash
