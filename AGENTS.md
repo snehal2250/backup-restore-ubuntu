@@ -503,6 +503,9 @@ whose `extensions`/models were installed).
   `REPO_ROOT` must itself be a `.test-tmp.*` sandbox, and every destructive path is
   containment-checked under it (`require_contained_dir`). App installs go through the TYPED installer
   functions in `lib/installers.sh` (`installer_run NAME`) — never inline shell.
+  `npm_global` also chmods the global npm tree user-readable after `sudo npm install -g`
+  (a restrictive sudo umask can leave it 0750 root:root, breaking the user-level
+  `npm list -g` source check and re-installing the app on every run).
 - **YAML is read with `yq`** (https://github.com/mikefarah/yq). `require_yq` follows
   `YQ_AUTO`. `app_get`/`installer_get` use `strenv(N)` for the app name (safe) and `$2`
   directly for the yq query (always a fixed expression like `.installer.type`). Write

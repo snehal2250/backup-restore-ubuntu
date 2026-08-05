@@ -233,6 +233,50 @@ else
   sandbox_cleanup
 fi
 
+t_begin "static: go entry pins a checksum (not the broken .sha256 sidecar)"
+# Rehearsal finding (2026-08): go.dev's .sha256 sidecar URL serves an HTML
+# error page, so checksum_url made the go install fail with a bogus checksum.
+# The inventory must pin the tarball's sha256 directly (and stay in sync with
+# the catalog template — a pinned checksum is version-specific: bump on bump).
+if ! command -v yq >/dev/null 2>&1; then
+  echo "  SKIP: yq not installed — go checksum guard skipped"
+else
+  _go_cs="$(yq -r '.apps[] | select(.name == "go") | .installer.checksum // ""' "$REPO_ROOT/inventory/inventory.yaml")"
+  _go_csurl="$(yq -r '.apps[] | select(.name == "go") | .installer.checksum_url // ""' "$REPO_ROOT/inventory/inventory.yaml")"
+  if [ -n "$_go_cs" ] && [ -z "$_go_csurl" ]; then
+    t_pass "go entry pins installer.checksum (no checksum_url)"
+  else
+    t_fail "go entry must pin installer.checksum with no checksum_url (got checksum='$_go_cs' checksum_url='$_go_csurl')"
+  fi
+  # Parity guard: a catalog fix must not silently drift from the inventory.
+  _cat_cs="$(bash -c 'source "'"$REPO_ROOT"'/lib/catalog.sh"; catalog_lookup go' | sed -n 's/^installer_checksum=//p' | tail -n1)"
+  assert_eq "$_cat_cs" "$_go_cs" "go pinned checksum matches the catalog template"
+fi
+
+t_begin "static: _installer_npm_global makes the global npm tree user-readable"
+# Rehearsal finding (2026-08): `sudo npm install -g` under a restrictive sudo
+# umask (027) created /usr/local/lib/node_modules as 0750 root:root — the
+# user-level `npm list -g` source check then failed and restore re-installed
+# the app on every run. The installer must chmod the global root after install.
+_npm_fn="$(sed -n '/^_installer_npm_global()/,/^}/p' "$REPO_ROOT/lib/installers.sh")"
+if printf '%s\n' "$_npm_fn" | grep -q 'npm root -g' && printf '%s\n' "$_npm_fn" | grep -q 'chmod -R a+rX'; then
+  t_pass "_installer_npm_global resolves + chmods the global npm root"
+else
+  t_fail "_installer_npm_global must chmod -R a+rX its \"npm root -g\" dir (rehearsal perms finding)"
+fi
+
+t_begin "static: _installer_tarball extracts under a sane umask"
+# Rehearsal finding (2026-08): extraction under the restoring user's
+# restrictive umask (007/027) masked archive modes to 0750, and the following
+# `sudo chown root:root` left /usr/local/<app> unreadable by the user — same
+# class of bug as the npm_global perms issue. The extract must run under 022.
+_tar_fn="$(sed -n '/^_installer_tarball()/,/^}/p' "$REPO_ROOT/lib/installers.sh")"
+if printf '%s\n' "$_tar_fn" | grep -q 'umask 022'; then
+  t_pass "_installer_tarball extracts under umask 022"
+else
+  t_fail "_installer_tarball must extract under umask 022 (rehearsal perms finding)"
+fi
+
 t_begin "static: declared support matrix is Ubuntu + amd64 only"
 # shellcheck source=lib/common.sh
 source "$REPO_ROOT/lib/common.sh"

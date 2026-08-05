@@ -153,7 +153,9 @@ apps:
       type: tarball
       url: "https://go.dev/dl/{version}.linux-{arch}.tar.gz"
       version_url: "https://go.dev/VERSION?m=text"
-      checksum_url: "https://go.dev/dl/{version}.linux-{arch}.tar.gz.sha256"
+      # Pinned checksum (go1.26.5): go.dev's .sha256 sidecar URL returns an
+      # HTML error page — pin the tarball's sha256 directly (bump on bump).
+      checksum: "5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053"
       binary: "go/bin/go"
       dest: "/usr/local"
     check_cmd: "go"

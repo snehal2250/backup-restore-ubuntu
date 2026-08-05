@@ -217,8 +217,22 @@ _installer_flatpak() {
 }
 
 _installer_npm_global() {
-  local name="$1"
-  run sudo npm install -g "$(installer_pkg "$name")"@latest
+  local name="$1" gdir
+  run sudo npm install -g "$(installer_pkg "$name")"@latest || return 1
+  # sudo's umask (e.g. 027) can leave the global node_modules tree root-owned
+  # and unreadable (0750), so the USER-level `npm list -g` source check fails
+  # and restore would re-install the app on every run — and the /usr/local/bin
+  # symlinks appear dangling (rehearsal finding, 2026-08). Make the tree
+  # user-readable so the source check and the symlinks work. Post-install
+  # side-effect only — skipped on --dry-run.
+  if [ "$DRY_RUN" != "1" ]; then
+    gdir="$(sudo npm root -g 2>/dev/null || true)"
+    if [ -n "$gdir" ] && [ -d "$gdir" ]; then
+      run sudo chmod -R a+rX "$gdir" || warn "  $name: could not fix permissions on $gdir — user-level npm checks may keep failing"
+    else
+      warn "  $name: could not resolve the npm global root (npm root -g) — permissions not hardened"
+    fi
+  fi
 }
 
 _installer_pipx() {
@@ -378,7 +392,12 @@ _installer_tarball() {
 
   local stage toplevel dirname binpath link
   stage="$(mktemp -d)"
-  if ! tar -xzf "$tmp" -C "$stage" 2>/dev/null; then
+  # Extract under a SANE umask: the restoring user's umask (e.g. 007/027)
+  # would otherwise mask the archive modes (0755 dirs -> 0750), and the tree
+  # is chowned root:root below — leaving /usr/local/<app> unreadable by the
+  # user (rehearsal finding, 2026-08; same class as the npm_global fix).
+  # umask 022 keeps the tarball's own modes (sensitive 0600 members stay 0600).
+  if ! ( umask 022; tar -xzf "$tmp" -C "$stage" 2>/dev/null ); then
     err "  $name: could not extract $tmp"
     rm -rf "$stage"
     return 1
