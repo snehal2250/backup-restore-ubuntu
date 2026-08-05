@@ -467,11 +467,12 @@ restore_config_tree() {
     journal_log "created" "$rb"
   fi
 
-  if [ "${#sudo_prefix[@]}" -gt 0 ]; then
-    run "${sudo_prefix[@]}" rsync -a "${extra[@]}" "$src/" "$dest/"
-  else
-    run rsync -a "${extra[@]}" "$src/" "$dest/"
-  fi
+  # Sync WITHOUT propagating the source tree's owner/group/mode onto $dest
+  # and its pre-existing dirs (restore_sync_tree re-asserts their modes and
+  # runs rsync with --no-owner --no-group — a plain `rsync -a "$src/" /`
+  # would rewrite / and /etc to the staged tree's attrs, rehearsal finding
+  # 2026-08-05).
+  restore_sync_tree "$src" "$dest" "${extra[*]:-}" "${sudo_prefix[*]:-}"
   ok "  $owner: config restored to $dest (conflict_policy=$policy)"
 }
 

@@ -709,7 +709,7 @@ cmd_remove_user_dir() {
     return 0
   fi
   # Remove both string-form and object-form entries matching this path.
-  P="$dir" yq -i ".user_dirs |= map(select((type == \"string\" and . != strenv(P)) or (type == \"object\" and .path != strenv(P))))" "$INVENTORY_FILE"
+  P="$dir" yq -i ".user_dirs |= map(select((.path // .) != strenv(P)))" "$INVENTORY_FILE"
   ok "Removed user dir '$dir'."
 }
 

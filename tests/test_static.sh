@@ -277,6 +277,69 @@ else
   t_fail "_installer_tarball must extract under umask 022 (rehearsal perms finding)"
 fi
 
+t_begin "static: user_dir_paths/user_dir_exclude handle string + object forms"
+# Rehearsal finding (2026-08-05): user_dir_paths used `if type == "object"`
+# — a LEXER ERROR in mikefarah yq (type/tag cannot follow `if`), silently
+# swallowed by `2>/dev/null || true`. user_dir_paths then returned EMPTY, so
+# backup.sh never captured user dirs (the manifest had zero user-dirs
+# artifacts), restore_user_dirs skipped them, and the overlap checks missed
+# them. The helpers must resolve BOTH the legacy string form and the schema
+# v7 object form (with exclude).
+if ! command -v yq >/dev/null 2>&1; then
+  echo "  SKIP: yq not installed — user_dir helper checks skipped"
+else
+  sandbox_new
+  SBUD="$SANDBOX"
+  mkdir -p "$SBUD/inventory"
+  cp "$REPO_ROOT/inventory/schema.yaml" "$SBUD/inventory/schema.yaml"
+  cat > "$SBUD/inventory/inventory.yaml" <<'YAML'
+schema_version: 7
+profile: workstation
+apt_packages: []
+snap_packages: []
+flatpak_apps: []
+dotfiles: []
+groups: []
+user_dirs:
+  - ~/Documents
+  - path: ~/.config/manicode/projects
+    exclude:
+      - "chats"
+apps: []
+services: []
+cron_jobs: []
+YAML
+  # shellcheck source=lib/common.sh
+  source "$REPO_ROOT/lib/common.sh"
+  INVENTORY_FILE="$SBUD/inventory/inventory.yaml"
+  INVENTORY_READ="$INVENTORY_FILE"
+  _ud_paths="$(user_dir_paths)"
+  assert_eq "~/Documents ~/.config/manicode/projects" "$(printf '%s\n' "$_ud_paths" | tr '\n' ' ' | sed 's/ $//')" "user_dir_paths lists string + object entries in order"
+  assert_eq "chats" "$(user_dir_exclude '~/.config/manicode/projects')" "user_dir_exclude returns the object form's exclude"
+  _ud_excl_doc="$(user_dir_exclude '~/Documents')"
+  assert_eq "" "$_ud_excl_doc" "user_dir_exclude returns nothing for a plain string entry"
+  sandbox_cleanup
+fi
+
+t_begin "static: config-tree sync never propagates source dir metadata (restore_sync_tree)"
+# Rehearsal finding (2026-08-05): `sudo rsync -a "$src/" /` propagated a
+# share-staged tree's dmode=0770 + vboxsf group onto / and /etc, locking out
+# every unprivileged daemon at boot. restore_config_tree must route its sync
+# through restore_sync_tree, which runs rsync with --no-owner --no-group and
+# re-asserts pre-existing destination dir modes.
+_sync_fn="$(sed -n '/^restore_sync_tree()/,/^}/p' "$REPO_ROOT/lib/common.sh")"
+if printf '%s\n' "$_sync_fn" | grep -q -- '--no-owner --no-group' && printf '%s\n' "$_sync_fn" | grep -q 'prot_dirs'; then
+  t_pass "restore_sync_tree uses --no-owner --no-group + dir-mode protection"
+else
+  t_fail "restore_sync_tree must sync with --no-owner --no-group and re-assert dir modes (rehearsal perms finding)"
+fi
+_cfg_fn="$(sed -n '/^restore_config_tree()/,/^}/p' "$REPO_ROOT/restore.sh")"
+if printf '%s\n' "$_cfg_fn" | grep -q 'restore_sync_tree'; then
+  t_pass "restore_config_tree routes its rsync through restore_sync_tree"
+else
+  t_fail "restore_config_tree must call restore_sync_tree (a direct rsync -a would clobber dest dir attrs)"
+fi
+
 t_begin "static: declared support matrix is Ubuntu + amd64 only"
 # shellcheck source=lib/common.sh
 source "$REPO_ROOT/lib/common.sh"

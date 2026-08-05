@@ -309,7 +309,14 @@ installer_has() {
 # Returns one path per line (empty lines suppressed).
 user_dir_paths() {
   require_yq "$YQ_AUTO"
-  yq -r '.user_dirs[] | (if type == "object" then .path else . end)' "${EFFECTIVE_INVENTORY:-$INVENTORY_FILE}" 2>/dev/null | grep -v '^\s*$' || true
+  # `.path // .` handles BOTH forms in one expression, order-preserving: a
+  # string entry has no .path (null) so it falls back to itself; an object
+  # entry yields .path. NOTE: `if type == "object"` is a LEXER ERROR in
+  # mikefarah yq (the `type`/`tag` functions are not usable after `if`), and
+  # the old expression's `2>/dev/null || true` silently swallowed it into an
+  # EMPTY result — which silently disabled user-dirs capture in backup.sh,
+  # restore_user_dirs and the overlap checks (rehearsal finding, 2026-08-05).
+  yq -r '.user_dirs[] | (.path // .)' "${EFFECTIVE_INVENTORY:-$INVENTORY_FILE}" 2>/dev/null | grep -v '^\s*$' || true
 }
 
 # user_dir_exclude PATH -> prints the exclude patterns for one user_dir entry
@@ -320,8 +327,12 @@ user_dir_exclude() {
   require_yq "$YQ_AUTO"
   local ud_path="$1"
   # Match the entry in user_dirs that has this path (either as a plain string
-  # or as .path in an object). Then print its .exclude[] items.
-  N="$ud_path" yq -r '.user_dirs[] | select((type == "object" and .path == strenv(N)) or (type == "string" and . == strenv(N))) | (if type == "object" and has("exclude") then .exclude[] else "" end)' "${EFFECTIVE_INVENTORY:-$INVENTORY_FILE}" 2>/dev/null | grep -v '^\s*$' || true
+  # or as .path in an object). Then print its .exclude[] items. The same yq
+  # quirk as user_dir_paths: `type`/`tag` after `if` is a lexer error, so the
+  # matching uses `(.path // .)` (works for both forms) and the exclude
+  # extraction uses `// ""` — the old `if type == "object"` expression never
+  # lexed and silently disabled exclude handling (rehearsal finding 2026-08-05).
+  N="$ud_path" yq -r '.user_dirs[] | select((.path // .) == strenv(N)) | (.exclude[]? // "")' "${EFFECTIVE_INVENTORY:-$INVENTORY_FILE}" 2>/dev/null | grep -v '^\s*$' || true
 }
 
 # --- Service start helpers ------------------------------------------------
@@ -1613,6 +1624,65 @@ rollback_capture() {
   done < <(cd "$src" && find . \( -type f -o -type l \) | sed 's|^\./||')
   [ "$found" = "1" ] && return 1
   return 0
+}
+
+# restore_sync_tree SRC DEST EXTRA SUDO — sync one backed-up config tree into
+# DEST WITHOUT propagating the source tree's directory metadata onto DEST or
+# any pre-existing destination directory.
+#
+# WHY: config restore runs `rsync -a "$src/" "$dest/"` for every config tree,
+# including ROOT trees with dest=/ (app/service config paths outside $HOME).
+# rsync -a propagates the SOURCE directory's owner/group/mode onto the
+# destination root and every corresponding destination dir. The staged backup
+# tree can legitimately carry foreign metadata — a vboxsf share presents
+# dmode=0770,gid=vboxsf and `cp -a` staging preserves it, and the staging user
+# (not root) owns the tree — so `sudo rsync -a backups/.../root/ /` would
+# rewrite / and /etc to the source's owner/group/mode. Rehearsal finding
+# (2026-08-05): / and /etc became vikram-athare:vboxsf 0770, locking out every
+# unprivileged daemon (dbus/resolved/avahi/polkit/NetworkManager failed at
+# boot) and eventually wedging the VM.
+#
+# The fix has two parts:
+#   1. --no-owner --no-group — ownership is never touched: files created by
+#      the (possibly sudo) rsync keep the running user's ownership (root-owned
+#      for /etc configs, user-owned for $HOME configs) and existing files keep
+#      theirs.
+#   2. Re-assert the pre-existing MODE of every destination dir the source
+#      tree maps onto (snapshotted BEFORE the sync, walked from the source).
+#      File modes are still preserved by -p (0600 keys stay 0600); dirs the
+#      sync CREATES (new config dirs, e.g. /etc/cloudflared) keep the source's
+#      mode, which is sane for a real backup.
+# Dry-run aware (run). EXTRA is an optional single rsync flag (e.g.
+# --ignore-existing); SUDO is an optional single prefix ("" or "sudo").
+restore_sync_tree() {
+  local src="$1" dest="$2" extra="${3:-}" sudo_prefix="${4:-}"
+  local -a extra_a=() sudo_a=()
+  [ -n "$extra" ] && extra_a=("$extra")
+  [ -n "$sudo_prefix" ] && sudo_a=("$sudo_prefix")
+  [ -d "$src" ] || return 0
+
+  # Snapshot the mode of every dest dir the source tree maps onto (the top
+  # level is ".", which maps to DEST itself).
+  local -a prot_dirs=() prot_modes=()
+  local rel m
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    [ -e "$dest/$rel" ] || continue
+    m="$(stat -c '%a' "$dest/$rel" 2>/dev/null || true)"
+    [ -n "$m" ] || continue
+    prot_dirs+=("$rel")
+    prot_modes+=("$m")
+  done < <(cd "$src" && find . -type d | sed 's|^\./||')
+
+  run "${sudo_a[@]}" rsync -a --no-owner --no-group "${extra_a[@]}" "$src/" "$dest/"
+
+  # Re-assert the pre-existing dir modes the sync would have clobbered.
+  local i=0
+  for rel in "${prot_dirs[@]}"; do
+    run "${sudo_a[@]}" chmod "${prot_modes[$i]}" "$dest/$rel" \
+      || warn "  restore_sync_tree: could not restore mode ${prot_modes[$i]} on $dest/$rel"
+    i=$((i + 1))
+  done
 }
 
 # --- Backup content integrity (SHA256SUMS) --------------------------------

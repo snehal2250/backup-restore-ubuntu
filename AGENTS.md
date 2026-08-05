@@ -486,6 +486,12 @@ whose `extensions`/models were installed).
   with no runnable phase at or after it),
   `rollback_init`/`rollback_capture`/`journal_log` (per-owner conflict policies,
   rollback bundle + restore journal),
+  `restore_sync_tree` (config-tree rsync that never propagates the staged
+  source tree's owner/group/mode onto the destination root or pre-existing
+  dirs — `--no-owner --no-group` + re-assertion of pre-existing dir modes;
+  a plain `rsync -a "$src/" /` would rewrite / and /etc to a share-staged
+  tree's attrs and lock out every unprivileged daemon, rehearsal finding
+  2026-08-05),
   `backup_generate_checksums`/`backup_verify_integrity` (SHA256SUMS content integrity:
   generated over the staged payload by `backup.sh`, verified by `restore.sh` before any
   config restore — hostile special files, escaping symlinks, missing/corrupt files,
