@@ -70,7 +70,11 @@ if [ -f "$INVENTORY_FILE" ] && command -v yq >/dev/null 2>&1; then
           _info_skip
         fi ;;
       script|deb|tarball)
-        if confirm "  $name: re-run the $itype installer to update?" "n"; then
+        # No prompt: this is an unattended updater (every other step is -y),
+        # and re-running the typed installer IS the update for these types.
+        # Gate on the app being installed so an update never installs a
+        # declared-but-not-yet-installed app.
+        if is_app_installed "$name"; then
           if installer_run "$name"; then _ok_update "$name ($itype)"; else _warn_fail "$name ($itype)"; fi
         else
           _info_skip

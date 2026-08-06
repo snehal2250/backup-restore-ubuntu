@@ -428,4 +428,28 @@ else
   echo "  SKIP  $CURRENT_TEST: host is not Ubuntu/amd64 (arch=$ARCH_NORM) — runtime gate not exercised here"
 fi
 
+t_begin "static: update_all_ubuntu.sh re-runs script/deb/tarball installers without prompting"
+# Reported bug (2026-08): step 5/5 asked "re-run the script installer to update? [y/N]"
+# but confirm()'s `read` consumed the `while ... done < <(yq ...)` stream instead of
+# the terminal — it ate the NEXT inventory line as the answer ([WARN] Please answer
+# y or n.), then hit EOF and died under set -e. The updater must not prompt at all:
+# re-running the typed installer IS the update for these types.
+if grep -q 'confirm' "$REPO_ROOT/update_all_ubuntu.sh"; then
+  t_fail "update_all_ubuntu.sh must not prompt (script/deb/tarball installers are re-run directly — a prompt inside the yq loop eats the stream)"
+else
+  t_pass "update_all_ubuntu.sh is fully non-interactive"
+fi
+
+t_begin "static: confirm() reads the controlling terminal when stdin is redirected"
+# Same root cause, fixed in the shared helper: prompts inside redirected loops
+# (update_all's yq stream, inventory.sh wizard's scan_candidates stream) must read
+# /dev/tty — plain `read` would consume the loop's data — and fall back to the
+# default when no terminal exists (never hang, never die under set -e).
+_confirm_fn="$(sed -n '/^confirm()/,/^}/p' "$REPO_ROOT/lib/common.sh")"
+if printf '%s\n' "$_confirm_fn" | grep -q '/dev/tty' && printf '%s\n' "$_confirm_fn" | grep -q -- '-t 0'; then
+  t_pass "confirm() reads /dev/tty when stdin is not a tty"
+else
+  t_fail "confirm() must read from /dev/tty when stdin is redirected (prompts otherwise eat the caller's loop stream)"
+fi
+
 t_summary

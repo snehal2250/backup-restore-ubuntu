@@ -179,6 +179,14 @@ require_cmd() {
 }
 
 # confirm "question" [default y|n] -> exit code 0 (yes) or 1 (no)
+# The prompt reads the CONTROLLING TERMINAL whenever stdin is not a terminal
+# (e.g. inside a `while ... done < <(yq ...)` loop — a plain `read` would
+# consume the loop's stream instead of the user's keystrokes; the
+# update_all_ubuntu.sh inventory-apps step hit exactly this, and the
+# inventory.sh wizard's scan loop would too). Piped stdin is deliberately
+# ignored — automation should use the scripts' --yes/--non-interactive flags.
+# When there is no terminal at all (cron, CI), or the terminal hits EOF, the
+# default answer is used instead of hanging or dying under set -e.
 confirm() {
   local question="${1:-Continue?}" default="${2:-n}" answer=""
   while :; do
@@ -187,7 +195,14 @@ confirm() {
     else
       printf '%s [y/N] ' "$question"
     fi
-    read -r answer
+    if [ -t 0 ]; then
+      read -r answer || { echo; answer="$default"; }
+    else
+      if ! read -r answer < /dev/tty 2>/dev/null; then
+        echo   # move past the prompt line — nothing to read from
+        answer="$default"
+      fi
+    fi
     [ -z "$answer" ] && answer="$default"
     case "$answer" in
       y|Y|yes|YES) return 0 ;;

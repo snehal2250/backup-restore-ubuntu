@@ -452,10 +452,13 @@ whose `extensions`/models were installed).
 # Ollama models — pulled via ollama pull
 ```
 
-**Keep everything current**:
+**Keep everything current** (unattended — no prompts):
 ```bash
 ./update_all_ubuntu.sh
 ```
+`script`/`deb`/`tarball` installers are re-run directly to update them (their install
+step IS the update), gated on the app being installed so an update never installs a
+declared-but-not-yet-installed app.
 
 **Scheduled backup** (systemd user timer):
 ```bash

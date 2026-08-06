@@ -41,7 +41,8 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   `--dry-run`, `--yes`, `--upgrade-base`, `--configs-only`, `--packages-only`,
   `--force-incomplete`.
 - `update_all_ubuntu.sh` — apt/snap/flatpak/npm + all declared apps (with truthful
-  per-item pass/fail/skip reporting), prompts before re-running custom installers.
+  per-item pass/fail/skip reporting); `script`/`deb`/`tarball` installers are re-run
+  directly with no prompt (unattended updater), gated on the app being installed.
 - `schedule_cron.sh` — **systemd user timer** (daily + 15min after boot) replacing the
   old @reboot cron approach; passes explicit environment, noninteractive mode.
 
