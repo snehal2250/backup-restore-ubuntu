@@ -398,6 +398,21 @@ else
   t_fail "restore_config_tree must mark_failure EXIT_CONFIGS_MISSING when restore_sync_tree returns nonzero"
 fi
 
+t_begin "static: timer log lives OUTSIDE the transactional backups/ dir"
+# Rehearsal finding (2026-08-06): the systemd timer service appended its log
+# to $REPO_ROOT/backups/timer-backup.log, but publish_backup atomically swaps
+# the WHOLE backups/ dir on every run (live -> backups.old.<pid> -> deleted
+# after verification), sweeping the log away — the timer's own output vanished
+# after every successful backup. The log must live outside backups/ (the
+# established ~/.local/state/backup-restore-ubuntu state dir).
+_sc_fn="$(sed -n '/^SERVICE_NAME=/,$p' "$REPO_ROOT/schedule_cron.sh")"
+if printf '%s\n' "$_sc_fn" | grep -q 'TIMER_LOG=".*local/state/backup-restore-ubuntu/timer-backup.log"' \
+   && ! printf '%s\n' "$_sc_fn" | grep -q 'backups/timer-backup.log'; then
+  t_pass "schedule_cron.sh logs to ~/.local/state (outside the swapped backups/ dir)"
+else
+  t_fail "schedule_cron.sh must log to a path OUTSIDE backups/ (publish_backup swaps the whole dir and sweeps the log)"
+fi
+
 t_begin "static: declared support matrix is Ubuntu + amd64 only"
 # shellcheck source=lib/common.sh
 source "$REPO_ROOT/lib/common.sh"

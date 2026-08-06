@@ -17,8 +17,13 @@ require_non_root
 
 SERVICE_NAME="backup-restore-ubuntu"
 USER_SYSTEMD_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+# Log OUTSIDE the transactional backups/ dir: publish_backup atomically swaps
+# the whole backups/ directory on every run, so a log inside it is swept away
+# (rehearsal finding, 2026-08). ~/.local/state/backup-restore-ubuntu is the
+# established state dir (rollback bundles + journal live there).
+TIMER_LOG="$HOME/.local/state/backup-restore-ubuntu/timer-backup.log"
 
-mkdir -p "$USER_SYSTEMD_DIR"
+mkdir -p "$USER_SYSTEMD_DIR" "$(dirname "$TIMER_LOG")"
 
 # --- Service unit ---
 cat > "$USER_SYSTEMD_DIR/${SERVICE_NAME}.service" <<SVC
@@ -37,8 +42,8 @@ Environment=HOME=$HOME
 Environment=USER=$USER
 Environment=YQ_AUTO=1
 Environment=SCHEMA_AUTO=1
-StandardOutput=append:$REPO_ROOT/backups/timer-backup.log
-StandardError=append:$REPO_ROOT/backups/timer-backup.log
+StandardOutput=append:$TIMER_LOG
+StandardError=append:$TIMER_LOG
 
 [Install]
 WantedBy=default.target
@@ -80,7 +85,7 @@ echo "  systemctl --user status ${SERVICE_NAME}.service"
 echo
 echo "Logs:"
 echo "  journalctl --user -u ${SERVICE_NAME}.service"
-echo "  tail -f $REPO_ROOT/backups/timer-backup.log"
+echo "  tail -f $TIMER_LOG"
 echo
 echo "The timer runs backup.sh daily and 15 minutes after each boot."
 echo "Use BACKUP_DEST env var before running this script to set a custom mirror:"
