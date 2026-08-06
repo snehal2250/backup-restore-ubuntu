@@ -26,3 +26,8 @@ backups.artifacts
 .service-entry.*
 .drift-tmpl.*
 .drift-decl.*
+
+# Rehearsal bootstrap/scratch scripts (.guest-*.sh) — one-command helpers for
+# the VirtualBox rehearsal rounds. Some hardcode the disposable-VM password
+# (e.g. pass@9191); they are local-only tools and must never be committed.
+.guest-*
