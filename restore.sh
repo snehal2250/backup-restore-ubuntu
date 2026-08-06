@@ -409,6 +409,19 @@ restore_config_tree() {
   local owner="$1" policy="$2" src="$3" dest="$4" rb="$5"; shift 5
   local -a sudo_prefix=("$@")
   [ -d "$src" ] || return 0
+  # Empty source tree — skip entirely. Legacy backups (created before the
+  # 2026-08-05 fix) hold an empty home//root/ dir for every app/service;
+  # restore maps root/ onto / (with sudo), and even an EMPTY `rsync -a root/ /`
+  # applies the staged dir's mode to the dest root (a 0770 vboxsf-staged tree
+  # rewrote / to 0770, locking out every unprivileged daemon at boot — the
+  # rehearsal finding that broke the whole restore). Nothing to copy: return
+  # before rollback capture, journal, or any system touch. Only skip when
+  # find SUCCEEDS and reports empty — an unreadable tree (find fails) falls
+  # through so restore_sync_tree reports the real error.
+  local _first
+  if _first="$(cd "$src" && find . -mindepth 1 -print -quit 2>/dev/null)"; then
+    [ -n "$_first" ] || return 0
+  fi
 
   # Rollback capture first: returns 1 if existing files would be overwritten.
   local had_existing=0
@@ -472,7 +485,17 @@ restore_config_tree() {
   # runs rsync with --no-owner --no-group — a plain `rsync -a "$src/" /`
   # would rewrite / and /etc to the staged tree's attrs, rehearsal finding
   # 2026-08-05).
-  restore_sync_tree "$src" "$dest" "${extra[*]:-}" "${sudo_prefix[*]:-}"
+  # Truthful exit codes (principle 9): a config that was never applied must
+  # not end with "[ OK ]" and a clean exit code. restore_sync_tree returns
+  # nonzero when the rsync (or the root mode re-assert) failed — mark the
+  # failure (the detail is already printed by restore_sync_tree) and skip the
+  # OK line. Return 0: callers don't branch on this, and a nonzero return
+  # would abort the whole restore under set -e for a single failed tree.
+  if ! restore_sync_tree "$src" "$dest" "${extra[*]:-}" "${sudo_prefix[*]:-}"; then
+    warn "  $owner: config sync FAILED for $dest — marking failure (see above)."
+    mark_failure "$EXIT_CONFIGS_MISSING"
+    return 0
+  fi
   ok "  $owner: config restored to $dest (conflict_policy=$policy)"
 }
 

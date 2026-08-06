@@ -93,13 +93,37 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ Root execution: `require_non_root` hard-fails (was silent misbehavior).
 - ✅ Source-specific install checks (`is_app_installed_by_source`).
 - ✅ Post-install phase: groups, default shell, app extensions/models.
-- 🚧 Validate the full flow in a disposable VM: fresh Ubuntu → `restore.sh` → verify.
-  Rehearsal (2026-08-01/02, VirtualBox) reached app 16/24 (docker) before an interrupted
-  apt transaction; dry-run verified accurate end-to-end. Remaining: complete a full clean
-  run, reboot + verify, idempotency pass (§ 6.7–6.8 of docs/REHEARSAL-VIRTUALBOX.md).
-  Rehearsal lessons baked into the docs: persistent guest DNS (static `/etc/resolv.conf`,
-  bypassing the NAT DNS proxy which breaks with host MagicDNS) + run restore from a TTY
-  with the screen lock disabled (a locked GUI mid-restore corrupts the package state).
+- ✅ Validate the full flow in a disposable VM: fresh Ubuntu → `restore.sh` → verify.
+  Rehearsal rounds (VirtualBox, 2026-08-01/02 + 2026-08-05) reached a full clean run of
+  **all 25 declared apps** (§ 6.7–6.8 of docs/REHEARSAL-VIRTUALBOX.md) — completed on
+  2026-08-05: fresh restore of every app, **cloudflared starts with healthy DNS**
+  (enabled + active, 0 failed units), a **clean reboot with all services green**
+  (`systemctl --failed` empty; `/` and `/etc` verified `root:root 755` after reboot —
+  the config-tree perms-fix validation), configs + user dirs restored (opencode config,
+  `~/Documents`, `~/.config/manicode/projects` with `chats` excluded), and an
+  **idempotency re-run** reporting everything "already installed (verified via
+  <source>)" with exit 0 (the az first-run failure — a transient unattended-upgrades
+  dpkg lock — was fixed by the re-run; the azure-cli repo has no `resolute` suite and
+  correctly fell back to `noble`). The round found and fixed **three real bugs**: the
+  schema-v7 `user_dirs` object form silently disabled user-dir capture (mikefarah yq
+  lexer error in `user_dir_paths`/`user_dir_exclude`, swallowed by
+  `2>/dev/null || true`) — fixed with `(.path // .)`; **config restore propagating
+  staging dir metadata onto `/` and `/etc`** (`sudo rsync -a` + a 0770 vboxsf-staged
+  tree made every unprivileged daemon die at boot) — fixed with the
+  `restore_sync_tree` helper (`--no-owner` `--no-group` + pre-existing dest-dir mode
+  re-assertion; `bcc4d3c`, `1679139`); and **backup.sh pre-creating an empty `root/`
+  dir for every app** — restore unconditionally rsync'd it onto `/` (an empty
+  `rsync -a root/ /` still applies the source top-dir's 0770 mode to the dest root,
+  which killed the whole restore at app 2/25 and re-corrupted `/`) — fixed with
+  per-path-only scope dirs in backup.sh + empty-tree skips in restore_config_tree and
+  restore_sync_tree + the sudo'd rsync-and-re-assert running inside ONE `bash -c`
+  (a later separate sudo could no longer be forked once `/` was mode-locked).
+  Known **environmental limitations** (not repo bugs): VirtualBox **NAT DNS flakiness**
+  (breaks with host MagicDNS; the persistent nmcli upstream fix survives reboot — it
+  caused run-1's git/gh failures) and **snap CLIs under headless guestcontrol** (`/ not
+  root-owned`, ollama "transient scope" — snap apps need a real GUI session). Rehearsal
+  lessons baked into the docs: persistent guest DNS + run restore from a TTY with the
+  screen lock disabled (a locked GUI mid-restore corrupts the package state).
 - ✅ Test `--dry-run` output is accurate end-to-end (verified by the rehearsal dry-run,
   which matched the real install commands until the run was interrupted).
 - ✅ `restore.sh --source <snapshot>` — external backup snapshot as a **first-class

@@ -340,6 +340,64 @@ else
   t_fail "restore_config_tree must call restore_sync_tree (a direct rsync -a would clobber dest dir attrs)"
 fi
 
+t_begin "static: empty source trees are skipped (never rewrite the dest root mode)"
+# Round-8 rehearsal finding (2026-08-05): backup.sh created an EMPTY root/ dir
+# for every app; restore unconditionally rsync'd it onto / with sudo, and
+# rsync -a applies the source top-dir's mode to the dest root — a 0770
+# vboxsf-staged tree rewrote / to 0770 and killed the boot (the restore died
+# at app 2/25). Both restore_config_tree and restore_sync_tree must skip
+# empty trees entirely.
+_sync_fn2="$(sed -n '/^restore_sync_tree()/,/^}/p' "$REPO_ROOT/lib/common.sh")"
+if printf '%s\n' "$_sync_fn2" | grep -q -- '-mindepth 1 -print -quit'; then
+  t_pass "restore_sync_tree skips empty source trees"
+else
+  t_fail "restore_sync_tree must skip empty source trees (an empty root/ artifact must never touch the dest root mode)"
+fi
+_cfg_fn2="$(sed -n '/^restore_config_tree()/,/^}/p' "$REPO_ROOT/restore.sh")"
+if printf '%s\n' "$_cfg_fn2" | grep -q -- '-mindepth 1 -print -quit'; then
+  t_pass "restore_config_tree skips empty source trees"
+else
+  t_fail "restore_config_tree must skip empty source trees (legacy artifacts hold empty home//root/ dirs)"
+fi
+
+t_begin "static: sudo'd rsync + mode re-assertion run in ONE root shell"
+# The round-8 failure chain: the rsync rewrites the dest root's mode DURING
+# the copy (0770 /), so a later separate `sudo chmod 755 /` can no longer be
+# forked by the user (traversal denied) and the re-assert never runs. The
+# sudo'd path must run rsync AND the chmods inside one bash -c.
+if printf '%s\n' "$_sync_fn2" | grep -q 'bash -c' && printf '%s\n' "$_sync_fn2" | grep -q 'sudo_a'; then
+  t_pass "restore_sync_tree runs the sudo'd rsync + re-asserts in one bash -c"
+else
+  t_fail "restore_sync_tree must run the sudo'd rsync + mode re-assertion inside one root shell"
+fi
+
+t_begin "static: backup.sh creates home//root/ scope dirs per-path only"
+# backup.sh must NOT pre-create an empty root/ dir for every app: restore
+# maps root/ onto / with sudo, so even an empty tree would rsync onto / and
+# rewrite its mode (round-8 rehearsal finding).
+if grep -q 'mkdir -p "$dest/home" "$dest/root"' "$REPO_ROOT/backup.sh"; then
+  t_fail "backup.sh must not create empty home//root/ dirs unconditionally (empty root/ -> restore rsyncs it onto /)"
+else
+  t_pass "backup.sh no longer pre-creates empty scope dirs"
+fi
+if grep -q 'mkdir -p "$sdest/home" "$sdest/root"' "$REPO_ROOT/backup.sh"; then
+  t_fail "backup.sh services loop must not pre-create empty scope dirs either"
+else
+  t_pass "backup.sh services loop creates scope dirs per-path only"
+fi
+
+t_begin "static: a failed config sync marks EXIT_CONFIGS_MISSING (truthful exit codes)"
+# Round-8 review finding: restore_sync_tree used to swallow rsync failures
+# with `|| warn` and return 0, so restore_config_tree printed "[ OK ] config
+# restored" and restore exited 0 for a config that was never applied
+# (violates principle 9). The caller must mark_failure and skip the OK line.
+_cfg_fn3="$(sed -n '/^restore_config_tree()/,/^}/p' "$REPO_ROOT/restore.sh")"
+if printf '%s\n' "$_cfg_fn3" | grep -q 'mark_failure "$EXIT_CONFIGS_MISSING"'; then
+  t_pass "restore_config_tree marks EXIT_CONFIGS_MISSING on a failed sync"
+else
+  t_fail "restore_config_tree must mark_failure EXIT_CONFIGS_MISSING when restore_sync_tree returns nonzero"
+fi
+
 t_begin "static: declared support matrix is Ubuntu + amd64 only"
 # shellcheck source=lib/common.sh
 source "$REPO_ROOT/lib/common.sh"

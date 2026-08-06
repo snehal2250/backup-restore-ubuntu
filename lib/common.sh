@@ -1660,6 +1660,18 @@ restore_sync_tree() {
   [ -n "$extra" ] && extra_a=("$extra")
   [ -n "$sudo_prefix" ] && sudo_a=("$sudo_prefix")
   [ -d "$src" ] || return 0
+  # Empty source tree: nothing to copy, and never touch the dest root's mode
+  # (legacy artifacts hold empty home//root/ dirs — rehearsal finding
+  # 2026-08-05: `rsync -a` of an empty staged tree rewrote / to the staged
+  # dir's mode). Only skip when find SUCCEEDS and reports empty — an
+  # unreadable tree (find fails) falls through so the rsync reports the real
+  # error. Defense-in-depth only: a tree holding empty subdirs but no files
+  # still rsyncs onto the dest root — the single-context root re-assert below
+  # is what protects / in that case.
+  local _first
+  if _first="$(cd "$src" && find . -mindepth 1 -print -quit 2>/dev/null)"; then
+    [ -n "$_first" ] || return 0
+  fi
 
   # Snapshot the mode of every dest dir the source tree maps onto (the top
   # level is ".", which maps to DEST itself).
@@ -1674,15 +1686,46 @@ restore_sync_tree() {
     prot_modes+=("$m")
   done < <(cd "$src" && find . -type d | sed 's|^\./||')
 
-  run "${sudo_a[@]}" rsync -a --no-owner --no-group "${extra_a[@]}" "$src/" "$dest/"
+  if [ "${#sudo_a[@]}" -gt 0 ]; then
+    # Root-owned dest: run the rsync AND the mode re-assertion inside ONE
+    # root shell. If the rsync rewrites the dest root's mode (rsync -a
+    # applies the source top-dir's mode to it — the rehearsal finding), a
+    # LATER separate `sudo chmod` could no longer be forked by the user
+    # (path traversal through a mode-locked / is denied), so the re-assert
+    # must already be running as root. The plan string is built with
+    # printf %q so arbitrary paths survive the inner bash -c parsing. The
+    # other interpolated pieces are trusted: extra is a fixed literal
+    # (--ignore-existing) and prot_modes are digit-only stat output — never
+    # user-derived values, so joining them into the command string is safe.
+    local cmd="rsync -a --no-owner --no-group"
+    [ "${#extra_a[@]}" -gt 0 ] && cmd="$cmd ${extra_a[*]}"
+    cmd="$cmd $(printf '%q' "$src")/ $(printf '%q' "$dest")/"
+    local i=0
+    for rel in "${prot_dirs[@]}"; do
+      cmd="$cmd && chmod ${prot_modes[$i]} $(printf '%q' "$dest/$rel")"
+      i=$((i + 1))
+    done
+    run "${sudo_a[@]}" bash -c "$cmd" \
+      || { warn "  restore_sync_tree: rsync or dir-mode re-assertion failed on $dest"; return 1; }
+  else
+    run "${sudo_a[@]}" rsync -a --no-owner --no-group "${extra_a[@]}" "$src/" "$dest/" \
+      || { warn "  restore_sync_tree: rsync failed on $dest"; return 1; }
 
-  # Re-assert the pre-existing dir modes the sync would have clobbered.
-  local i=0
-  for rel in "${prot_dirs[@]}"; do
-    run "${sudo_a[@]}" chmod "${prot_modes[$i]}" "$dest/$rel" \
-      || warn "  restore_sync_tree: could not restore mode ${prot_modes[$i]} on $dest/$rel"
-    i=$((i + 1))
-  done
+    # Re-assert the pre-existing dir modes the sync would have clobbered.
+    # (No sudo here: dest is user-owned, so the owner can always chmod back —
+    # even if the rsync briefly rewrote $HOME's own mode.) Deliberate
+    # asymmetry: a re-assert chmod failure here warns but does NOT fail the
+    # sync (the user can always fix their own $HOME modes), whereas in the
+    # sudo branch the chmods run inside the root shell, so a failed re-assert
+    # fails the sync and marks EXIT_CONFIGS_MISSING — root-owned dest modes
+    # are the catastrophic class.
+    local i=0
+    for rel in "${prot_dirs[@]}"; do
+      run chmod "${prot_modes[$i]}" "$dest/$rel" \
+        || warn "  restore_sync_tree: could not restore mode ${prot_modes[$i]} on $dest/$rel"
+      i=$((i + 1))
+    done
+  fi
 }
 
 # --- Backup content integrity (SHA256SUMS) --------------------------------

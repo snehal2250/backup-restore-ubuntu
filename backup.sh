@@ -81,7 +81,14 @@ _safe_rsync() {
 while IFS= read -r name; do
   [ -n "$name" ] || continue
   dest="$STAGE/apps/$name"
-  mkdir -p "$dest/home" "$dest/root"
+  # The home//root/ scope subdirs are created PER-PATH below (only when a
+  # declared path actually lands in that scope). Never create them
+  # unconditionally: restore maps an existing apps/<name>/root/ tree onto /
+  # (with sudo), so an EMPTY root/ dir would still trigger `rsync -a root/ /`
+  # — and rsync -a applies the source top-dir's mode to the dest root,
+  # rewriting / to the staged tree's attrs (rehearsal finding 2026-08-05: a
+  # vboxsf-staged 0770 root/ dir turned / into 0770 and broke every boot).
+  mkdir -p "$dest"
   info "Backing up config for app: $name"
   _app_ok=1
   _app_paths=0   # any config_path declared (non-empty) seen
@@ -110,6 +117,7 @@ while IFS= read -r name; do
       continue
     fi
     if [[ "$src" == "$HOME"* ]]; then
+      mkdir -p "$dest/home"
       rel="${src#"$HOME"/}"
       if ( cd "$HOME" && _safe_rsync "$dest/home" "./$rel" "${excl[@]}" ); then
         ok "  $p -> backups/apps/$name/"
@@ -120,11 +128,14 @@ while IFS= read -r name; do
     elif [ ! -r "$src" ]; then
       warn "  $p -> not readable by current user; fix permissions (chmod/chown) or declare a readable path in the inventory"
       _app_ok=0
-    elif ( cd / && _safe_rsync "$dest/root" "./${src#/}" "${excl[@]}" ); then
-      ok "  $p -> backups/apps/$name/"
     else
-      warn "  $p -> rsync failed (partial read?); fix permissions and re-run"
-      _app_ok=0
+      mkdir -p "$dest/root"
+      if ( cd / && _safe_rsync "$dest/root" "./${src#/}" "${excl[@]}" ); then
+        ok "  $p -> backups/apps/$name/"
+      else
+        warn "  $p -> rsync failed (partial read?); fix permissions and re-run"
+        _app_ok=0
+      fi
     fi
   done < <(app_get "$name" '.config_paths[]?')
 
@@ -146,7 +157,11 @@ done < <(yaml_list '.apps[] | .name')
 while IFS=$'\t' read -r unit target; do
   [ -n "$unit" ] || continue
   sdest="$STAGE/services/$unit"
-  mkdir -p "$sdest/home" "$sdest/root"
+  # Scope subdirs (home//root/) are created per-path below — never
+  # unconditionally (see the apps loop comment: an empty root/ tree would be
+  # restored onto / and rewrite its mode). The unit file itself copies
+  # directly into $sdest/unit.
+  mkdir -p "$sdest"
   _svc_ok=1
   _svc_has_unit=0
   # Backup-completeness policy (schema v4), same semantics as apps. Reads
@@ -179,8 +194,8 @@ while IFS=$'\t' read -r unit target; do
       _svc_ok=0
       continue
     fi
-    mkdir -p "$sdest/home" "$sdest/root"
     if [[ "$csrc" == "$HOME"* ]]; then
+      mkdir -p "$sdest/home"
       rel="${csrc#"$HOME"/}"
       if ( cd "$HOME" && _safe_rsync "$sdest/home" "./$rel" ); then
         ok "  $unit: $p -> backups/services/$unit/"
@@ -191,11 +206,14 @@ while IFS=$'\t' read -r unit target; do
     elif [ ! -r "$csrc" ]; then
       warn "  $unit: $p -> not readable by current user; fix permissions (chmod/chown) or declare a readable path in the inventory"
       _svc_ok=0
-    elif ( cd / && _safe_rsync "$sdest/root" "./${csrc#/}" ); then
-      ok "  $unit: $p -> backups/services/$unit/"
     else
-      warn "  $unit: $p -> rsync failed (partial read?); fix permissions and re-run"
-      _svc_ok=0
+      mkdir -p "$sdest/root"
+      if ( cd / && _safe_rsync "$sdest/root" "./${csrc#/}" ); then
+        ok "  $unit: $p -> backups/services/$unit/"
+      else
+        warn "  $unit: $p -> rsync failed (partial read?); fix permissions and re-run"
+        _svc_ok=0
+      fi
     fi
   done < <(unit="$unit" yq -r ".services[] | select(.unit == strenv(unit)) | .config_paths[]?" "$INVENTORY_READ")
 

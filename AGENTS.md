@@ -491,7 +491,20 @@ whose `extensions`/models were installed).
   dirs — `--no-owner --no-group` + re-assertion of pre-existing dir modes;
   a plain `rsync -a "$src/" /` would rewrite / and /etc to a share-staged
   tree's attrs and lock out every unprivileged daemon, rehearsal finding
-  2026-08-05),
+  2026-08-05. Two round-8 (2026-08-05) hardening rules: EMPTY source trees
+  are skipped entirely — even an empty `rsync -a "$src/" /` applies the
+  source top-dir's mode to the dest root, so an empty staged `root/` dir
+  (0770 on a vboxsf share) rewrote / to 0770 and killed the boot — and for
+  root-owned dests the rsync + re-assertion run inside ONE `sudo bash -c`,
+  because once the rsync clobbers the dest root's mode a later separate
+  `sudo chmod` can no longer be forked by the user (traversal denied) and
+  the re-assert would never run. backup.sh creates the apps/<name>/home and
+  apps/<name>/root scope dirs PER-PATH only (a declared path landing in that
+  scope) — never unconditionally, so an app with no root-owned config has no
+  root/ artifact at all and restore never touches / for it. A sync that FAILS
+  returns nonzero and `restore_config_tree` marks `EXIT_CONFIGS_MISSING`, so a
+  config that was never applied can never end with "[ OK ]" and a clean exit
+  code (truthful reporting, principle 9)),
   `backup_generate_checksums`/`backup_verify_integrity` (SHA256SUMS content integrity:
   generated over the staged payload by `backup.sh`, verified by `restore.sh` before any
   config restore — hostile special files, escaping symlinks, missing/corrupt files,
